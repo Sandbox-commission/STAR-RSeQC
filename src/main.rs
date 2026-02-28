@@ -17,19 +17,83 @@ use std::time::{Duration, Instant};
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
-// ─── Defaults ────────────────────────────────────────────────────────────────
-
-const GENOME_DIR: &str =
-    "/home/cml/humandb/transcriptomeindex/ensembl113/star_hg38_101bp_index";
-const GTF_FILE: &str =
-    "/home/cml/humandb/transcriptomeindex/ensembl113/Homo_sapiens.GRCh38.113.gtf";
-const FASTA_FILE: &str =
-    "/home/cml/humandb/transcriptomeindex/ensembl113/genome.fa";
-const STAR_ENV: &str = "/home/cml/miniforge3/envs/star";
-const RSEQC_ENV: &str = "/home/cml/miniforge3/envs/RSeQC";
-const SAMTOOLS_BIN: &str = "/home/cml/Downloads/samtools-1.15.1/samtools";
-
 const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+
+// ─── Configuration System ────────────────────────────────────────────────────
+// Configuration resolution order (highest to lowest priority):
+// 1. CLI flags (--genome-dir, --gtf, --star-env, etc.)
+// 2. ~/.config/star-rseqc/config.json (user-local configuration file)
+// 3. Auto-detection (find_conda_env, find_samtools)
+// 4. Empty PathBuf (caught by validate_environment)
+
+#[derive(serde::Deserialize, Default)]
+struct FileConfig {
+    genome_dir: Option<String>,
+    gtf: Option<String>,
+    #[allow(dead_code)]
+    fasta: Option<String>,
+    star_env: Option<String>,
+    rseqc_env: Option<String>,
+    samtools: Option<String>,
+}
+
+fn config_file_path() -> Option<PathBuf> {
+    env::var_os("HOME").map(|home| {
+        let home = PathBuf::from(home);
+        home.join(".config/star-rseqc/config.json")
+    })
+}
+
+fn load_file_config() -> FileConfig {
+    match config_file_path() {
+        None => FileConfig::default(),
+        Some(path) => match fs::read_to_string(&path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(_) => FileConfig::default(),
+        },
+    }
+}
+
+fn find_conda_env(name: &str) -> Option<PathBuf> {
+    let candidates = ["miniforge3", "mambaforge", "miniconda3"];
+
+    for cand in &candidates {
+        if let Ok(home) = env::var("HOME") {
+            let env_path = PathBuf::from(home).join(cand).join("envs").join(name);
+            if env_path.exists() {
+                return Some(env_path);
+            }
+        }
+    }
+
+    // Also check /opt/conda
+    let opt_path = PathBuf::from("/opt/conda/envs").join(name);
+    if opt_path.exists() {
+        return Some(opt_path);
+    }
+
+    None
+}
+
+fn find_samtools(star_env: &Path) -> Option<PathBuf> {
+    let in_star_env = star_env.join("bin/samtools");
+    if in_star_env.exists() {
+        return Some(in_star_env);
+    }
+
+    // Check system PATH
+    if let Ok(output) = Command::new("which").arg("samtools").output() {
+        if output.status.success() {
+            let path_str = String::from_utf8_lossy(&output.stdout);
+            let path = path_str.trim();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+
+    None
+}
 
 // ─── Help ────────────────────────────────────────────────────────────────────
 
@@ -74,17 +138,17 @@ fn usage() {
     eprintln!("    -t, --threads <N>         Threads per STAR alignment job");
     eprintln!("                              [default: auto-detected from CPU count]");
     eprintln!("    --genome-dir <DIR>        STAR genome index directory");
-    eprintln!("                              [default: {}]", GENOME_DIR);
+    eprintln!("                              [set via --flag, ~/.config/star-rseqc/config.json, or auto-detected]");
     eprintln!("    --gtf <FILE>              GTF annotation file");
-    eprintln!("                              [default: {}]", GTF_FILE);
+    eprintln!("                              [set via --flag, ~/.config/star-rseqc/config.json, or auto-detected]");
     eprintln!("    --bed <FILE>              Pre-built BED12 file for RSeQC");
     eprintln!("                              (auto-generated from GTF if omitted)");
     eprintln!("    --samtools <PATH>         Path to samtools binary");
-    eprintln!("                              [default: {}]", SAMTOOLS_BIN);
-    eprintln!("    --star-env <DIR>          STAR conda environment prefix");
-    eprintln!("                              [default: {}]", STAR_ENV);
-    eprintln!("    --rseqc-env <DIR>         RSeQC conda environment prefix");
-    eprintln!("                              [default: {}]", RSEQC_ENV);
+    eprintln!("                              [set via --flag, ~/.config/star-rseqc/config.json, or auto-detected]");
+    eprintln!("    --star-env <DIR>          STAR conda environment prefix (or 'auto' to search)");
+    eprintln!("                              [set via --flag, ~/.config/star-rseqc/config.json, or auto-detected]");
+    eprintln!("    --rseqc-env <DIR>         RSeQC conda environment prefix (or 'auto' to search)");
+    eprintln!("                              [set via --flag, ~/.config/star-rseqc/config.json, or auto-detected]");
     eprintln!("    --bam-sort-ram <BYTES>    RAM limit for BAM sorting");
     eprintln!("                              [default: auto-detected from available RAM]");
     eprintln!("    --skip-qc                 Skip RSeQC steps (alignment only)");
@@ -102,14 +166,14 @@ fn usage() {
     eprintln!("        50T_CRC_1P.fastq.gz   ->  sample = 50T_CRC");
     eprintln!();
     eprintln!("REFERENCE FILES:");
-    eprintln!("    STAR index : {}", GENOME_DIR);
-    eprintln!("    GTF        : {}", GTF_FILE);
-    eprintln!("    FASTA      : {}", FASTA_FILE);
+    eprintln!("    STAR index : [configured via --genome-dir or config file]");
+    eprintln!("    GTF        : [configured via --gtf or config file]");
+    eprintln!("    FASTA      : [used for building genome index if needed]");
     eprintln!();
     eprintln!("TOOL ENVIRONMENTS:");
-    eprintln!("    STAR       : {}/bin/STAR", STAR_ENV);
-    eprintln!("    samtools   : {}", SAMTOOLS_BIN);
-    eprintln!("    RSeQC      : {}/bin/infer_experiment.py", RSEQC_ENV);
+    eprintln!("    STAR       : [auto-detected or set via --star-env]");
+    eprintln!("    samtools   : [auto-detected or set via --samtools]");
+    eprintln!("    RSeQC      : [auto-detected or set via --rseqc-env]");
     eprintln!();
     eprintln!("OUTPUT STRUCTURE:");
     eprintln!("    <output>/");
@@ -170,11 +234,14 @@ fn usage() {
 // ─── System resource detection ───────────────────────────────────────────────
 
 fn read_available_ram() -> u64 {
-    let Ok(file) = std::fs::File::open("/proc/meminfo") else { return 0; };
+    let Ok(file) = std::fs::File::open("/proc/meminfo") else {
+        return 0;
+    };
     let reader = BufReader::new(file);
     for line in reader.lines().flatten() {
         if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            let kib: u64 = rest.split_whitespace()
+            let kib: u64 = rest
+                .split_whitespace()
                 .next()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
@@ -186,13 +253,15 @@ fn read_available_ram() -> u64 {
 
 fn detect_system_resources() -> (u64, usize) {
     let ram = read_available_ram();
-    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     (ram, cpus)
 }
 
 fn auto_config_resources(available_ram: u64, total_cpus: usize) -> (usize, usize, u64) {
-    const PER_JOB_RAM: u64  = 6_000_000_000; // 6 GB per job max
-    const OS_BUFFER: u64    = 2_000_000_000; // reserve for OS
+    const PER_JOB_RAM: u64 = 6_000_000_000; // 6 GB per job max
+    const OS_BUFFER: u64 = 2_000_000_000; // reserve for OS
     let usable = available_ram.saturating_sub(OS_BUFFER);
     // Each job uses 6 GB total
     let jobs = ((usable / PER_JOB_RAM) as usize).max(1);
@@ -230,14 +299,18 @@ fn parse_args() -> Option<Config> {
         return None;
     }
 
+    // Load file configuration (layer 2 in priority order)
+    let file_cfg = load_file_config();
+
     let mut fastq_dir: Option<PathBuf> = None;
     let mut output_dir = PathBuf::from("star-rseqc-results");
-    let mut genome_dir = PathBuf::from(GENOME_DIR);
-    let mut gtf = PathBuf::from(GTF_FILE);
+    // Initialize with file config layer (layer 2), will be overridden by CLI flags (layer 1)
+    let mut genome_dir: Option<PathBuf> = file_cfg.genome_dir.map(PathBuf::from);
+    let mut gtf: Option<PathBuf> = file_cfg.gtf.map(PathBuf::from);
     let mut bed: Option<PathBuf> = None;
-    let mut star_env = PathBuf::from(STAR_ENV);
-    let mut rseqc_env = PathBuf::from(RSEQC_ENV);
-    let mut samtools = PathBuf::from(SAMTOOLS_BIN);
+    let mut star_env: Option<PathBuf> = file_cfg.star_env.map(PathBuf::from);
+    let mut rseqc_env: Option<PathBuf> = file_cfg.rseqc_env.map(PathBuf::from);
+    let mut samtools: Option<PathBuf> = file_cfg.samtools.map(PathBuf::from);
     let mut threads_per_sample: Option<usize> = None;
     let mut parallel_jobs: Option<usize> = None;
     let mut bam_sort_ram: Option<u64> = None;
@@ -282,22 +355,32 @@ fn parse_args() -> Option<Config> {
                 }));
             }
             "--genome-dir" => {
-                genome_dir = PathBuf::from(next_val!("--genome-dir"));
+                genome_dir = Some(PathBuf::from(next_val!("--genome-dir")));
             }
             "--gtf" => {
-                gtf = PathBuf::from(next_val!("--gtf"));
+                gtf = Some(PathBuf::from(next_val!("--gtf")));
             }
             "--bed" => {
                 bed = Some(PathBuf::from(next_val!("--bed")));
             }
             "--star-env" => {
-                star_env = PathBuf::from(next_val!("--star-env"));
+                let val = next_val!("--star-env");
+                if val == "auto" {
+                    star_env = find_conda_env("star");
+                } else {
+                    star_env = Some(PathBuf::from(val));
+                }
             }
             "--rseqc-env" => {
-                rseqc_env = PathBuf::from(next_val!("--rseqc-env"));
+                let val = next_val!("--rseqc-env");
+                if val == "auto" {
+                    rseqc_env = find_conda_env("rseqc");
+                } else {
+                    rseqc_env = Some(PathBuf::from(val));
+                }
             }
             "--samtools" => {
-                samtools = PathBuf::from(next_val!("--samtools"));
+                samtools = Some(PathBuf::from(next_val!("--samtools")));
             }
             "--bam-sort-ram" => {
                 let v = next_val!("--bam-sort-ram");
@@ -331,14 +414,37 @@ fn parse_args() -> Option<Config> {
         }
     };
 
+    // Apply layer 3 auto-detection: star_env, rseqc_env, samtools
+    if star_env.is_none() {
+        star_env = find_conda_env("star");
+    }
+    if rseqc_env.is_none() {
+        rseqc_env = find_conda_env("rseqc");
+    }
+    // For samtools, we need a valid star_env to search within it
+    if samtools.is_none() {
+        if let Some(ref star) = star_env {
+            samtools = find_samtools(star);
+        }
+    }
+
     // Resolve resource parameters — auto-detect anything not explicitly set
-    let resources_auto = parallel_jobs.is_none() || threads_per_sample.is_none() || bam_sort_ram.is_none();
+    let resources_auto =
+        parallel_jobs.is_none() || threads_per_sample.is_none() || bam_sort_ram.is_none();
     let (parallel_jobs, threads_per_sample, bam_sort_ram) = if resources_auto {
         let (avail_ram, total_cpus) = detect_system_resources();
         let (aj, at, ab) = auto_config_resources(avail_ram, total_cpus);
-        (parallel_jobs.unwrap_or(aj), threads_per_sample.unwrap_or(at), bam_sort_ram.unwrap_or(ab))
+        (
+            parallel_jobs.unwrap_or(aj),
+            threads_per_sample.unwrap_or(at),
+            bam_sort_ram.unwrap_or(ab),
+        )
     } else {
-        (parallel_jobs.unwrap(), threads_per_sample.unwrap(), bam_sort_ram.unwrap())
+        (
+            parallel_jobs.unwrap(),
+            threads_per_sample.unwrap(),
+            bam_sort_ram.unwrap(),
+        )
     };
 
     if parallel_jobs == 0 {
@@ -353,12 +459,12 @@ fn parse_args() -> Option<Config> {
     Some(Config {
         fastq_dir,
         output_dir,
-        genome_dir,
-        gtf,
+        genome_dir: genome_dir.unwrap_or_default(),
+        gtf: gtf.unwrap_or_default(),
         bed,
-        star_env,
-        rseqc_env,
-        samtools,
+        star_env: star_env.unwrap_or_default(),
+        rseqc_env: rseqc_env.unwrap_or_default(),
+        samtools: samtools.unwrap_or_default(),
         threads_per_sample,
         parallel_jobs,
         bam_sort_ram,
@@ -539,7 +645,12 @@ fn sha256_file_list(files: &[PathBuf]) -> String {
 
     let mut hasher = Sha256::new();
     for path in files {
-        hasher.update(path.file_name().unwrap_or_default().to_string_lossy().as_bytes());
+        hasher.update(
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .as_bytes(),
+        );
         if path.exists() {
             if let Ok(bytes) = sha256_file(path) {
                 hasher.update(&bytes);
@@ -640,9 +751,20 @@ fn parse_checkpoint(content: &str) -> Option<(String, String)> {
 ///   NotDone         — no checkpoint → must process
 enum ResumeStatus {
     SameHash,
-    StarChanged  { old: String, new: String },
-    RseqcChanged { old: String, new: String },
-    BothChanged  { old_star: String, new_star: String, old_rseqc: String, new_rseqc: String },
+    StarChanged {
+        old: String,
+        new: String,
+    },
+    RseqcChanged {
+        old: String,
+        new: String,
+    },
+    BothChanged {
+        old_star: String,
+        new_star: String,
+        old_rseqc: String,
+        new_rseqc: String,
+    },
     NotDone,
 }
 
@@ -709,7 +831,11 @@ fn discover_samples(fastq_dir: &Path) -> Vec<Sample> {
         let r2 = r1.parent().unwrap().join(&r2_name);
 
         if !r2.exists() {
-            eprintln!("Warning: skipping {} — R2 not found ({})", sample_name, r2.display());
+            eprintln!(
+                "Warning: skipping {} — R2 not found ({})",
+                sample_name,
+                r2.display()
+            );
             continue;
         }
 
@@ -870,10 +996,7 @@ fn process_sample(
     let qc_dir = config.output_dir.join("qc");
     let log_dir = config.output_dir.join("logs");
 
-    let bam_path = star_dir.join(format!(
-        "{}_Aligned.sortedByCoord.out.bam",
-        sample.name
-    ));
+    let bam_path = star_dir.join(format!("{}_Aligned.sortedByCoord.out.bam", sample.name));
     let out_prefix = format!("{}/{}_", star_dir.display(), sample.name);
     let job_start = Instant::now();
 
@@ -883,7 +1006,10 @@ fn process_sample(
 
         if bam_path.exists() {
             // Resume: BAM exists, skip alignment
-            state.add_event(format!("  RESUME  {} — BAM exists, skipping STAR", sample.name));
+            state.add_event(format!(
+                "  RESUME  {} — BAM exists, skipping STAR",
+                sample.name
+            ));
         } else {
             let star_bin = config.star_env.join("bin/STAR");
             let (stdout_cfg, stderr_cfg) =
@@ -951,7 +1077,10 @@ fn process_sample(
                 }
                 Ok(false) => {
                     cleanup_partial_star(&star_dir, &sample.name);
-                    state.add_event(format!("  FAIL  {} — STAR alignment error (cleaned)", sample.name));
+                    state.add_event(format!(
+                        "  FAIL  {} — STAR alignment error (cleaned)",
+                        sample.name
+                    ));
                     return Err(format!("{}: STAR failed", sample.name));
                 }
                 Err(e) => {
@@ -968,8 +1097,15 @@ fn process_sample(
 
     // ── Verify BAM ──
     if !bam_path.exists() {
-        state.add_event(format!("  FAIL  {} — BAM not found after alignment", sample.name));
-        return Err(format!("{}: BAM not found: {}", sample.name, bam_path.display()));
+        state.add_event(format!(
+            "  FAIL  {} — BAM not found after alignment",
+            sample.name
+        ));
+        return Err(format!(
+            "{}: BAM not found: {}",
+            sample.name,
+            bam_path.display()
+        ));
     }
 
     // ── Step 2: samtools index ──
@@ -977,7 +1113,12 @@ fn process_sample(
     let bai_path = PathBuf::from(format!("{}.bai", bam_path.display()));
     if !bai_path.exists() {
         let mut cmd = Command::new(&config.samtools);
-        cmd.args(["index", "-@", &config.threads_per_sample.to_string(), bam_path.to_str().unwrap()]);
+        cmd.args([
+            "index",
+            "-@",
+            &config.threads_per_sample.to_string(),
+            bam_path.to_str().unwrap(),
+        ]);
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
         match run_cancellable(cmd) {
@@ -1307,9 +1448,8 @@ fn render_screen(
     bline!(Color::Magenta, phase_line);
 
     if resumed > 0 {
-        let resume_line = format!(
-            "  Resumed: {resumed} sample(s) already completed from previous run"
-        );
+        let resume_line =
+            format!("  Resumed: {resumed} sample(s) already completed from previous run");
         bline!(Color::DarkYellow, resume_line);
     }
 
@@ -1702,23 +1842,21 @@ where
             let errs = &errors;
             let w = &worker;
             let st = &state;
-            s.spawn(move || {
-                loop {
-                    if is_cancelled() {
-                        break;
-                    }
-                    let idx = next.fetch_add(1, Ordering::Relaxed);
-                    if idx >= items.len() {
-                        break;
-                    }
-                    if let Err(e) = w(&items[idx], slot) {
-                        if e != "Cancelled" {
-                            errs.lock().unwrap().push(e);
-                        }
-                    }
-                    st.clear_slot(slot);
-                    std::thread::yield_now();
+            s.spawn(move || loop {
+                if is_cancelled() {
+                    break;
                 }
+                let idx = next.fetch_add(1, Ordering::Relaxed);
+                if idx >= items.len() {
+                    break;
+                }
+                if let Err(e) = w(&items[idx], slot) {
+                    if e != "Cancelled" {
+                        errs.lock().unwrap().push(e);
+                    }
+                }
+                st.clear_slot(slot);
+                std::thread::yield_now();
             });
         }
     });
@@ -1805,9 +1943,14 @@ fn main() -> ExitCode {
     eprintln!("Environment OK.");
     eprintln!(
         "Resources: {} job(s) x {} thread(s)/job, {:.1} GB BAM sort RAM{}",
-        config.parallel_jobs, config.threads_per_sample,
+        config.parallel_jobs,
+        config.threads_per_sample,
         config.bam_sort_ram as f64 / 1e9,
-        if config.resources_auto { " [auto-detected]" } else { " [manual]" }
+        if config.resources_auto {
+            " [auto-detected]"
+        } else {
+            " [manual]"
+        }
     );
 
     // ── Discover samples ──
@@ -1825,7 +1968,12 @@ fn main() -> ExitCode {
     // ── Create output structure ──
     for subdir in ["star", "qc", "logs"] {
         if let Err(e) = fs::create_dir_all(config.output_dir.join(subdir)) {
-            eprintln!("Cannot create {}/{}: {}", config.output_dir.display(), subdir, e);
+            eprintln!(
+                "Cannot create {}/{}: {}",
+                config.output_dir.display(),
+                subdir,
+                e
+            );
             return ExitCode::FAILURE;
         }
     }
@@ -1869,7 +2017,9 @@ fn main() -> ExitCode {
             ResumeStatus::StarChanged { old, new } => {
                 eprintln!(
                     "  STAR changed: {} (was {}..., now {}...)",
-                    s.name, &old[..12.min(old.len())], &new[..12.min(new.len())]
+                    s.name,
+                    &old[..12.min(old.len())],
+                    &new[..12.min(new.len())]
                 );
                 output_changed += 1;
                 to_process.push(s);
@@ -1877,12 +2027,19 @@ fn main() -> ExitCode {
             ResumeStatus::RseqcChanged { old, new } => {
                 eprintln!(
                     "  RSeQC changed: {} (was {}..., now {}...)",
-                    s.name, &old[..12.min(old.len())], &new[..12.min(new.len())]
+                    s.name,
+                    &old[..12.min(old.len())],
+                    &new[..12.min(new.len())]
                 );
                 output_changed += 1;
                 to_process.push(s);
             }
-            ResumeStatus::BothChanged { old_star, new_star, old_rseqc, new_rseqc } => {
+            ResumeStatus::BothChanged {
+                old_star,
+                new_star,
+                old_rseqc,
+                new_rseqc,
+            } => {
                 eprintln!(
                     "  STAR+RSeQC changed: {} (star: {}…→{}…, rseqc: {}…→{}…)",
                     s.name,
@@ -1908,9 +2065,7 @@ fn main() -> ExitCode {
         );
     }
     if output_changed > 0 {
-        eprintln!(
-            "  {output_changed} sample(s) have corrupted/changed outputs — will re-process."
-        );
+        eprintln!("  {output_changed} sample(s) have corrupted/changed outputs — will re-process.");
     }
 
     // ── Dry run ──
@@ -1934,10 +2089,17 @@ fn main() -> ExitCode {
         let auto_tag = if config.resources_auto { " (auto)" } else { "" };
         println!(
             "  {} parallel job(s){} x {} thread(s)/job{} = {} total threads",
-            config.parallel_jobs, auto_tag, config.threads_per_sample, auto_tag,
+            config.parallel_jobs,
+            auto_tag,
+            config.threads_per_sample,
+            auto_tag,
             config.parallel_jobs * config.threads_per_sample
         );
-        println!("  BAM sort RAM: {:.1} GB per job{}", config.bam_sort_ram as f64 / 1e9, auto_tag);
+        println!(
+            "  BAM sort RAM: {:.1} GB per job{}",
+            config.bam_sort_ram as f64 / 1e9,
+            auto_tag
+        );
         println!("  Output: {}", config.output_dir.display());
         println!("  BED12:  {}", bed_path.display());
         return ExitCode::SUCCESS;
@@ -1958,7 +2120,9 @@ fn main() -> ExitCode {
 
     let phase_label = format!(
         "STAR 2-pass + RSeQC ({} samples, {}x{}t{})",
-        to_process.len(), config.parallel_jobs, config.threads_per_sample,
+        to_process.len(),
+        config.parallel_jobs,
+        config.threads_per_sample,
         if config.resources_auto { " [auto]" } else { "" }
     );
     let state = Arc::new(ProgressState::new(
@@ -1973,8 +2137,7 @@ fn main() -> ExitCode {
         ));
     }
 
-    let mut display =
-        DisplayThread::start(Arc::clone(&state), config.parallel_jobs, already_done);
+    let mut display = DisplayThread::start(Arc::clone(&state), config.parallel_jobs, already_done);
 
     let config_ref = &config;
     let bed_ref = &bed_path;
@@ -1989,7 +2152,9 @@ fn main() -> ExitCode {
                 state.completed.fetch_add(1, Ordering::Relaxed);
                 state.add_event(format!(
                     "  DONE  {} — star:{}… rseqc:{}…",
-                    sample.name, &digests.star[..12], &digests.rseqc[..12]
+                    sample.name,
+                    &digests.star[..12],
+                    &digests.rseqc[..12]
                 ));
             }
             Err(e) if e == "Cancelled" => {
@@ -2023,20 +2188,13 @@ fn main() -> ExitCode {
     println!();
     println!("  \u{2554}{}\u{2557}", "\u{2550}".repeat(52));
     if was_cancelled {
-        println!(
-            "  \u{2551}         STAR-RSeQC  -  Cancelled by user           \u{2551}"
-        );
+        println!("  \u{2551}         STAR-RSeQC  -  Cancelled by user           \u{2551}");
     } else {
-        println!(
-            "  \u{2551}           STAR-RSeQC  -  Run Complete              \u{2551}"
-        );
+        println!("  \u{2551}           STAR-RSeQC  -  Run Complete              \u{2551}");
     }
     println!("  \u{2560}{}\u{2563}", "\u{2550}".repeat(52));
     println!("  \u{2551}  Total samples:      {:<29}\u{2551}", total);
-    println!(
-        "  \u{2551}  Completed (new):    {:<29}\u{2551}",
-        completed
-    );
+    println!("  \u{2551}  Completed (new):    {:<29}\u{2551}", completed);
     if already_done > 0 {
         println!(
             "  \u{2551}  Resumed (SHA256 OK): {:<28}\u{2551}",
@@ -2053,13 +2211,26 @@ fn main() -> ExitCode {
         "  \u{2551}  Failed:             {:<29}\u{2551}",
         failed_count
     );
-    println!("  \u{2551}  Elapsed:            {:<29}\u{2551}", elapsed_str);
-    println!("  \u{2551}  Threads/sample:     {:<29}\u{2551}",
-        if config.resources_auto { format!("{} (auto)", config.threads_per_sample) }
-        else { config.threads_per_sample.to_string() });
-    println!("  \u{2551}  Parallel jobs:      {:<29}\u{2551}",
-        if config.resources_auto { format!("{} (auto)", config.parallel_jobs) }
-        else { config.parallel_jobs.to_string() });
+    println!(
+        "  \u{2551}  Elapsed:            {:<29}\u{2551}",
+        elapsed_str
+    );
+    println!(
+        "  \u{2551}  Threads/sample:     {:<29}\u{2551}",
+        if config.resources_auto {
+            format!("{} (auto)", config.threads_per_sample)
+        } else {
+            config.threads_per_sample.to_string()
+        }
+    );
+    println!(
+        "  \u{2551}  Parallel jobs:      {:<29}\u{2551}",
+        if config.resources_auto {
+            format!("{} (auto)", config.parallel_jobs)
+        } else {
+            config.parallel_jobs.to_string()
+        }
+    );
     println!("  \u{2560}{}\u{2563}", "\u{2550}".repeat(52));
     println!(
         "  \u{2551}  Output : {:<41}\u{2551}",
@@ -2143,7 +2314,11 @@ fn write_summary_files(output_dir: &Path, samples: &[Sample]) {
                 .ok()
                 .and_then(|c| parse_checkpoint(&c))
                 .unwrap_or_default();
-            let sha256 = format!("star:{}|rseqc:{}", &star_sha[..16.min(star_sha.len())], &rseqc_sha[..16.min(rseqc_sha.len())]);
+            let sha256 = format!(
+                "star:{}|rseqc:{}",
+                &star_sha[..16.min(star_sha.len())],
+                &rseqc_sha[..16.min(rseqc_sha.len())]
+            );
             SummaryRow {
                 sample: n.clone(),
                 sha256,
@@ -2151,9 +2326,15 @@ fn write_summary_files(output_dir: &Path, samples: &[Sample]) {
                 log_final: star_dir.join(format!("{n}_Log.final.out")).exists(),
                 log_out: star_dir.join(format!("{n}_Log.out")).exists(),
                 log_progress: star_dir.join(format!("{n}_Log.progress.out")).exists(),
-                bam_sorted: star_dir.join(format!("{n}_Aligned.sortedByCoord.out.bam")).exists(),
-                bam_index: star_dir.join(format!("{n}_Aligned.sortedByCoord.out.bam.bai")).exists(),
-                bam_transcriptome: star_dir.join(format!("{n}_Aligned.toTranscriptome.out.bam")).exists(),
+                bam_sorted: star_dir
+                    .join(format!("{n}_Aligned.sortedByCoord.out.bam"))
+                    .exists(),
+                bam_index: star_dir
+                    .join(format!("{n}_Aligned.sortedByCoord.out.bam.bai"))
+                    .exists(),
+                bam_transcriptome: star_dir
+                    .join(format!("{n}_Aligned.toTranscriptome.out.bam"))
+                    .exists(),
                 gene_counts: star_dir.join(format!("{n}_ReadsPerGene.out.tab")).exists(),
                 splice_junctions: star_dir.join(format!("{n}_SJ.out.tab")).exists(),
                 chimeric_junction: star_dir.join(format!("{n}_Chimeric.out.junction")).exists(),
@@ -2162,8 +2343,12 @@ fn write_summary_files(output_dir: &Path, samples: &[Sample]) {
                 strand_qc: qc_dir.join(format!("{n}.strand.txt")).exists(),
                 genebody_txt: qc_dir.join(format!("{n}.geneBodyCoverage.txt")).exists(),
                 genebody_r: qc_dir.join(format!("{n}.geneBodyCoverage.r")).exists(),
-                genebody_curves_pdf: qc_dir.join(format!("{n}.geneBodyCoverage.curves.pdf")).exists(),
-                genebody_heatmap_pdf: qc_dir.join(format!("{n}.geneBodyCoverage.heatMap.pdf")).exists(),
+                genebody_curves_pdf: qc_dir
+                    .join(format!("{n}.geneBodyCoverage.curves.pdf"))
+                    .exists(),
+                genebody_heatmap_pdf: qc_dir
+                    .join(format!("{n}.geneBodyCoverage.heatMap.pdf"))
+                    .exists(),
                 readdist_qc: qc_dir.join(format!("{n}.read_distribution.txt")).exists(),
             }
         })
@@ -2184,11 +2369,20 @@ fn write_summary_files(output_dir: &Path, samples: &[Sample]) {
         let ok = |b: bool| if b { "OK" } else { "MISSING" };
         tsv.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            r.sample, r.sha256,
-            ok(r.log_final), ok(r.bam_sorted), ok(r.bam_index),
-            ok(r.bam_transcriptome), ok(r.gene_counts), ok(r.splice_junctions),
-            ok(r.chimeric_junction), ok(r.chimeric_sam), ok(r.strand_qc),
-            ok(r.genebody_txt), ok(r.genebody_r), ok(r.genebody_curves_pdf),
+            r.sample,
+            r.sha256,
+            ok(r.log_final),
+            ok(r.bam_sorted),
+            ok(r.bam_index),
+            ok(r.bam_transcriptome),
+            ok(r.gene_counts),
+            ok(r.splice_junctions),
+            ok(r.chimeric_junction),
+            ok(r.chimeric_sam),
+            ok(r.strand_qc),
+            ok(r.genebody_txt),
+            ok(r.genebody_r),
+            ok(r.genebody_curves_pdf),
             ok(r.readdist_qc),
         ));
     }

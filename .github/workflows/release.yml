@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    name: Build Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - run: cargo build --release --target x86_64-unknown-linux-gnu
+      - run: strip target/x86_64-unknown-linux-gnu/release/star-rseqc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: star-rseqc-linux-x86_64
+          path: target/x86_64-unknown-linux-gnu/release/star-rseqc
+
+  create-release:
+    name: Create Release
+    needs: build-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: star-rseqc-linux-x86_64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: star-rseqc-linux-x86_64
+          generate_release_notes: true

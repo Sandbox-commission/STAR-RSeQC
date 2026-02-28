@@ -9,8 +9,29 @@ tracking and directory-wise SHA256 integrity verification.
 
 ---
 
+## Quick Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Sandbox-commission/STAR-RSeQC/main/setup.sh | bash
+```
+
+This interactive script will:
+- Auto-detect your conda/mamba installation
+- Create `star` and `rseqc` conda environments
+- Prompt for reference file paths (or build a STAR index if needed)
+- Install the pre-built binary (or compile from source)
+- Write configuration to `~/.config/star-rseqc/config.json`
+
+After setup, add `~/.local/bin` to your PATH and run:
+```bash
+star-rseqc /path/to/fastq/directory
+```
+
+---
+
 ## Table of Contents
 
+- [Quick Install](#quick-install)
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -60,35 +81,69 @@ tracking and directory-wise SHA256 integrity verification.
 
 ## Requirements
 
-| Tool | Version | Conda Environment |
-|------|---------|-------------------|
-| [STAR](https://github.com/alexdobin/STAR) | v2.7.11b+ | `/home/cml/miniforge3/envs/star` |
-| [samtools](http://www.htslib.org/) | v1.15+ | `/home/cml/Downloads/samtools-1.15.1/samtools` |
-| [RSeQC](http://rseqc.sourceforge.net/) | v5.0+ | `/home/cml/miniforge3/envs/RSeQC` |
-| Rust toolchain | 1.70+ (edition 2021) | — |
+| Tool | Version | Setup |
+|------|---------|--------|
+| [STAR](https://github.com/alexdobin/STAR) | v2.7.11b+ | Auto-installed via `setup.sh` in `star` conda environment |
+| [samtools](http://www.htslib.org/) | v1.15+ | Auto-installed via `setup.sh` in `star` conda environment |
+| [RSeQC](http://rseqc.sourceforge.net/) | v5.0+ | Auto-installed via `setup.sh` in `rseqc` conda environment |
+| conda/mamba | — | Required; auto-detected from standard install locations |
 
 ### Reference files
 
-| File | Default Path |
-|------|-------------|
-| STAR genome index | `/home/cml/humandb/transcriptomeindex/ensembl113/star_hg38_101bp_index` |
-| GTF annotation | `/home/cml/humandb/transcriptomeindex/ensembl113/Homo_sapiens.GRCh38.113.gtf` |
-| Reference FASTA | `/home/cml/humandb/transcriptomeindex/ensembl113/genome.fa` |
+| File | Setup |
+|------|--------|
+| STAR genome index | Specified interactively during `setup.sh`; or auto-built from FASTA+GTF if needed |
+| GTF annotation | Specified interactively during `setup.sh` |
+| Reference FASTA | Required only if building STAR index from scratch (optional) |
+
+All paths are stored in `~/.config/star-rseqc/config.json` and auto-detected or manually overridable via CLI flags.
 
 ---
 
 ## Installation
 
+### Automated Setup (Recommended)
+
+The easiest way to get started is to use the provided setup script (see [Quick Install](#quick-install)):
+
 ```bash
-cd /home/cml/rust-codes/star-rseqc
-cargo build --release
-
-# The binary is at:
-#   target/release/star-rseqc
-
-# Optionally copy to a directory in your PATH:
-cp target/release/star-rseqc ~/.local/bin/
+curl -fsSL https://raw.githubusercontent.com/Sandbox-commission/STAR-RSeQC/main/setup.sh | bash
 ```
+
+### Manual Install
+
+1. **From source:**
+   ```bash
+   git clone https://github.com/Sandbox-commission/STAR-RSeQC.git
+   cd STAR-RSeQC
+   cargo build --release
+   cp target/release/star-rseqc ~/.local/bin/
+   ```
+
+2. **Create conda environments:**
+   ```bash
+   mamba create -n star -c bioconda -c conda-forge star=2.7.11b samtools
+   mamba create -n rseqc -c bioconda -c conda-forge rseqc python
+   ```
+
+3. **Create config file:**
+   ```bash
+   mkdir -p ~/.config/star-rseqc
+   cat > ~/.config/star-rseqc/config.json << 'EOF'
+   {
+     "genome_dir": "/path/to/star/index",
+     "gtf": "/path/to/annotation.gtf",
+     "star_env": "/path/to/miniforge3/envs/star",
+     "rseqc_env": "/path/to/miniforge3/envs/rseqc",
+     "samtools": "/path/to/samtools"
+   }
+   EOF
+   ```
+
+4. **Add to PATH:**
+   ```bash
+   export PATH="$HOME/.local/bin:$PATH"
+   ```
 
 ### Dependencies (Cargo.toml)
 
@@ -381,22 +436,53 @@ Features:
 
 ## Reference Configuration
 
-Default paths are compiled into the binary. Override any of them with command-line
-flags:
+Configuration values are resolved in a 3-layer priority system:
+
+1. **CLI flags** (highest priority)
+   - `--genome-dir`, `--gtf`, `--star-env`, `--rseqc-env`, `--samtools`
+   - Special: `--star-env auto` or `--rseqc-env auto` trigger automatic environment search
+
+2. **Config file** (`~/.config/star-rseqc/config.json`)
+   - User-local configuration persisted by `setup.sh`
+   - Example:
+     ```json
+     {
+       "genome_dir": "/mnt/reference/star_hg38_101bp",
+       "gtf": "/mnt/reference/Homo_sapiens.GRCh38.113.gtf",
+       "star_env": "/home/user/miniforge3/envs/star",
+       "rseqc_env": "/home/user/miniforge3/envs/rseqc",
+       "samtools": "/home/user/miniforge3/envs/star/bin/samtools"
+     }
+     ```
+
+3. **Auto-detection** (lowest priority)
+   - Searches for `star` and `rseqc` conda environments in standard locations:
+     - `~/miniforge3/envs/{name}`
+     - `~/mambaforge/envs/{name}`
+     - `~/miniconda3/envs/{name}`
+     - `/opt/conda/envs/{name}`
+   - Searches for `samtools` in STAR environment `bin/` and system PATH
+
+### Usage Examples
 
 ```bash
-# Override genome index and GTF
+# Use config file + auto-detection (no flags needed)
+star-rseqc /data/Paired/
+
+# Override with CLI flags (highest priority)
 star-rseqc /data/Paired/ \
     --genome-dir /alt/star_index \
     --gtf /alt/annotation.gtf
 
-# Use a different samtools
-star-rseqc /data/Paired/ --samtools /usr/bin/samtools
-
-# Use different conda environments
+# Auto-detect conda environments
 star-rseqc /data/Paired/ \
-    --star-env /opt/envs/star \
-    --rseqc-env /opt/envs/rseqc
+    --star-env auto \
+    --rseqc-env auto
+
+# Mix config file, auto-detection, and CLI overrides
+star-rseqc /data/Paired/ \
+    --samtools /usr/local/bin/samtools \
+    --threads 16
 ```
 
 ---

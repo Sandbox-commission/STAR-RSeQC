@@ -1,0 +1,13 @@
+target/
+.git/
+.github/
+.gitignore
+README.md
+*.md
+.DS_Store
+*.swp
+*.swo
+*~
+.claude/
+star-rseqc-results/
+config.json

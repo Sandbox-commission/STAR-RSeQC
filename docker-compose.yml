@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  star-rseqc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: star-rseqc:latest
+    container_name: star-rseqc-pipeline
+
+    # Mount volumes for data access
+    volumes:
+      # Read-only FASTQ input
+      - ${FASTQ_DIR:-.}:/data/input:ro
+      # Results output (writable)
+      - ${OUTPUT_DIR:-./star-rseqc-results}:/data/output
+      # Reference files (read-only)
+      - ${GENOME_DIR:-.}:/data/reference/genome:ro
+      - ${GTF_DIR:-.}:/data/reference/gtf:ro
+      # Config
+      - ${CONFIG_DIR:-./config}:/root/.config/star-rseqc:ro
+
+    environment:
+      # Configure via environment variables (optional)
+      - STAR_THREADS=${STAR_THREADS:-8}
+      - PARALLEL_JOBS=${PARALLEL_JOBS:-4}
+
+    # Resource limits (adjust as needed)
+    deploy:
+      resources:
+        limits:
+          cpus: '16'
+          memory: 32G
+        reservations:
+          cpus: '8'
+          memory: 16G
+
+    # Interactive mode
+    stdin_open: true
+    tty: true
+
+    # Run as non-root if possible
+    user: "1000:1000"
+
+    # Keep container running for debugging
+    command: /bin/bash
+
+# Override with:
+# docker-compose up -d
+# docker-compose exec star-rseqc star-rseqc /data/input -o /data/output

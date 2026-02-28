@@ -1,5 +1,4 @@
 /target/
-Cargo.lock
 *.swp
 *.swo
 *~
@@ -9,3 +8,5 @@ star-rseqc-results/
 *.bai
 *.fastq.gz
 .claude/
+config.json
+~/.config/star-rseqc/
