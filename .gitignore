@@ -10,3 +10,4 @@ star-rseqc-results/
 .claude/
 config.json
 ~/.config/star-rseqc/
+*.zip

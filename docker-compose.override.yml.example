@@ -1,0 +1,12 @@
+# Copy this file to docker-compose.override.yml for interactive debugging:
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# Then run:
+#   docker-compose up -d
+#   docker-compose exec star-rseqc bash
+
+version: '3.8'
+
+services:
+  star-rseqc:
+    command: /bin/bash

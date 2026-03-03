@@ -21,19 +21,18 @@ services:
       - ${CONFIG_DIR:-./config}:/root/.config/star-rseqc:ro
 
     environment:
-      # Configure via environment variables (optional)
       - STAR_THREADS=${STAR_THREADS:-8}
       - PARALLEL_JOBS=${PARALLEL_JOBS:-4}
 
-    # Resource limits (adjust as needed)
+    # Resource limits (configurable via env vars)
     deploy:
       resources:
         limits:
-          cpus: '16'
-          memory: 32G
+          cpus: '${CPU_LIMIT:-16}'
+          memory: ${MEM_LIMIT:-32G}
         reservations:
-          cpus: '8'
-          memory: 16G
+          cpus: '${CPU_RESERVE:-8}'
+          memory: ${MEM_RESERVE:-16G}
 
     # Interactive mode
     stdin_open: true
@@ -42,9 +41,12 @@ services:
     # Run as non-root if possible
     user: "1000:1000"
 
-    # Keep container running for debugging
-    command: /bin/bash
-
-# Override with:
-# docker-compose up -d
-# docker-compose exec star-rseqc star-rseqc /data/input -o /data/output
+# Usage:
+#   FASTQ_DIR=/path/to/fastq docker-compose up
+#
+# Override resources:
+#   CPU_LIMIT=32 MEM_LIMIT=64G docker-compose up
+#
+# For interactive debugging, use the override file:
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#   docker-compose up

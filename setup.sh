@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -eo pipefail
 
 # STAR-RSeQC Setup Script — Enhanced Version
 # Three installation paths:
@@ -36,26 +36,6 @@ pause_and_ask() {
     read -p "$(echo -e ${YELLOW})Press Enter to continue...$(echo -e ${NC})" -r
 }
 
-# ─── Main Menu ──────────────────────────────────────────────────────────────
-
-log_header "STAR-RSeQC Setup"
-echo "Choose your installation method:"
-echo
-echo "  1) Docker Container (Recommended) — everything pre-configured"
-echo "  2) Mamba/Conda (Automatic) — auto-install dependencies"
-echo "  3) Manual Installation — follow web links & instructions"
-echo "  4) Exit"
-echo
-read -p "Select option [1-4]: " -r CHOICE
-
-case "$CHOICE" in
-    1) setup_docker ;;
-    2) setup_mamba_auto ;;
-    3) setup_manual ;;
-    4) echo "Exiting."; exit 0 ;;
-    *) log_error "Invalid choice."; exit 1 ;;
-esac
-
 # ─── SECTION 1: DOCKER SETUP ────────────────────────────────────────────────
 
 setup_docker() {
@@ -76,7 +56,7 @@ setup_docker() {
         case "$DOCKER_CHOICE" in
             a) install_docker_auto ;;
             b) install_docker_manual ;;
-            c) main ;;
+            c) return ;;
             *) log_error "Invalid choice."; exit 1 ;;
         esac
     fi
@@ -395,12 +375,28 @@ setup_manual() {
     pause_and_ask
 }
 
-# ─── Execute based on shell mode ─────────────────────────────────────────────
+# ─── Main Menu ──────────────────────────────────────────────────────────────
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    # Script is being executed directly, not sourced
-    true
-else
-    # Script is being sourced
-    true
-fi
+main() {
+    while true; do
+        log_header "STAR-RSeQC Setup"
+        echo "Choose your installation method:"
+        echo
+        echo "  1) Docker Container (Recommended) — everything pre-configured"
+        echo "  2) Mamba/Conda (Automatic) — auto-install dependencies"
+        echo "  3) Manual Installation — follow web links & instructions"
+        echo "  4) Exit"
+        echo
+        read -p "Select option [1-4]: " -r CHOICE
+
+        case "$CHOICE" in
+            1) setup_docker; break ;;
+            2) setup_mamba_auto; break ;;
+            3) setup_manual; break ;;
+            4) echo "Exiting."; exit 0 ;;
+            *) log_error "Invalid choice. Please try again." ;;
+        esac
+    done
+}
+
+main
