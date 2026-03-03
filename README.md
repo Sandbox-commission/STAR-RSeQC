@@ -217,8 +217,8 @@ Files must follow this pattern:
 The sample name is everything before `_1P` or `_2P`:
 
 ```
-103N_GBC_1P.fastq.gz   →  sample = 103N_GBC
-50T_CRC_1P.fastq.gz    →  sample = 50T_CRC
+SAMPLE1_CONTROL_1P.fastq.gz   →  sample = SAMPLE1_CONTROL
+SAMPLE1_CASE_1P.fastq.gz    →  sample = SAMPLE1_CASE
 ```
 
 Both R1 and R2 must exist for a sample to be included. Samples without a
@@ -402,23 +402,23 @@ The pipeline features a full-screen terminal interface built with `crossterm`:
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
-║  star-rseqc v0.1.0  │  STAR + RSeQC RNA-seq Pipeline           ║
+║  star-rseqc v0.1.0  │  STAR + RSeQC RNA-seq Pipeline             ║
 ╠══════════════════════════════════════════════════════════════════╣
-║  Phase: Processing samples                                      ║
+║  Phase: Processing samples                                       ║
 ║                                                                  ║
-║  Overall: ██████████████░░░░░░░░░░░░░░░░  12/24  (50.0%)       ║
-║  Elapsed: 02:34:15  │  ETA: ~02:30:00                           ║
+║  Overall: ██████████████░░░░░░░░░░░░░░░░  12/24  (50.0%)         ║
+║  Elapsed: 02:34:15  │  ETA: ~02:30:00                            ║
 ║                                                                  ║
 ║  ── Active Jobs ──                                               ║
-║  ⠋ [1] 103T_GBC     STAR alignment          (12m 34s)          ║
-║  ⠹ [2] 104N_CRC     RSeQC: gene body cov.   (02m 11s)         ║
+║  ⠋ [1] 103T_GBC     STAR alignment          (12m 34s)            ║
+║  ⠹ [2] 104N_CRC     RSeQC: gene body cov.   (02m 11s)            ║
 ║                                                                  ║
-║  Completed: 10  │  Skipped: 2  │  Failed: 0                    ║
+║  Completed: 10  │  Skipped: 2  │  Failed: 0                      ║
 ║                                                                  ║
 ║  ── Recent Activity ──                                           ║
-║    DONE  103N_GBC — star:a1b2c3d4e5f6… rseqc:7890abcdef12…     ║
-║    DONE  52N_PACA — STAR alignment                               ║
-║    DONE  52N_PACA — samtools index                               ║
+║    DONE  SAMPLE1_CONTROL — star:a1b2c3d4e5f6… rseqc:7890abcdef12…║
+║    DONE  SAMPLE1_CONTROL — STAR alignment                        ║
+║    DONE  SAMPLE1_CONTROL — samtools index                        ║
 ║                                                                  ║
 ║  Press Ctrl+C to cancel gracefully                               ║
 ╚══════════════════════════════════════════════════════════════════╝
