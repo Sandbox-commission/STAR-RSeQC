@@ -41,6 +41,16 @@ pause_and_ask() {
 setup_docker() {
     log_header "Docker Container Installation"
 
+    # Auto-detect correct Docker socket
+    # Docker Desktop sets DOCKER_HOST to ~/.docker/desktop/docker.sock which
+    # fails when only the system daemon (systemctl start docker) is running.
+    if command -v docker &> /dev/null && ! docker info &> /dev/null; then
+        if [[ -S /var/run/docker.sock ]]; then
+            export DOCKER_HOST="unix:///var/run/docker.sock"
+            log_step "FIX" "Switched to system Docker socket (/var/run/docker.sock)"
+        fi
+    fi
+
     # Check if Docker is installed
     if command -v docker &> /dev/null; then
         log_success "Docker found: $(docker --version)"
