@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use log::warn;
+use log::{info, warn};
 
 use crate::checkpoint::{checkpoint_dir, parse_checkpoint};
 use crate::config::Config;
@@ -398,6 +398,119 @@ where
     errors.into_inner().unwrap()
 }
 
+// ─── Genome index detection & generation ─────────────────────────────────────
+
+/// Check if a STAR genome index exists in the given directory.
+/// Looks for the `Genome`, `SA`, and `SAindex` files that STAR generates.
+pub(crate) fn genome_index_exists(genome_dir: &Path) -> bool {
+    genome_dir.join("Genome").exists()
+        && genome_dir.join("SA").exists()
+        && genome_dir.join("SAindex").exists()
+}
+
+/// Find a FASTA reference file (.fa, .fna, .fasta) in the given directory.
+/// Returns the first match found.
+pub(crate) fn find_fasta_in_dir(dir: &Path) -> Option<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return None;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            match ext.to_lowercase().as_str() {
+                "fa" | "fna" | "fasta" => return Some(path),
+                "gz" => {
+                    // Check for .fa.gz, .fna.gz, .fasta.gz
+                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    if stem.ends_with(".fa") || stem.ends_with(".fna") || stem.ends_with(".fasta") {
+                        return Some(path);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Generate a STAR genome index from a FASTA file + GTF annotation.
+///
+/// Runs: STAR --runMode genomeGenerate --genomeDir <dir> --genomeFastaFiles <fasta>
+///       --sjdbGTFfile <gtf> --runThreadN <threads>
+///
+/// This is a long-running operation (30-90 min for human genome).
+pub(crate) fn generate_genome_index(
+    config: &Config,
+    fasta_path: &Path,
+) -> Result<(), String> {
+    let star_bin = config.star_env.join("bin/STAR");
+    let genome_dir = &config.genome_dir;
+
+    // Ensure genome_dir exists
+    fs::create_dir_all(genome_dir).map_err(|e| {
+        format!(
+            "Cannot create genome index directory {}: {}",
+            genome_dir.display(),
+            e
+        )
+    })?;
+
+    // Use all available threads for indexing (it's a single-shot operation)
+    let index_threads = config.parallel_jobs * config.threads_per_sample;
+
+    let mut cmd = Command::new(&star_bin);
+    cmd.args([
+        "--runMode",
+        "genomeGenerate",
+        "--genomeDir",
+        genome_dir.to_str().unwrap(),
+        "--genomeFastaFiles",
+        fasta_path.to_str().unwrap(),
+        "--runThreadN",
+        &index_threads.to_string(),
+    ]);
+
+    // Add GTF for splice-junction-aware indexing if available
+    if config.gtf.exists() {
+        cmd.args(["--sjdbGTFfile", config.gtf.to_str().unwrap()]);
+    }
+
+    // Log to file in genome_dir
+    let log_path = genome_dir.join("genomeGenerate.log");
+    let log_file = File::create(&log_path).map_err(|e| {
+        format!("Cannot create log file {}: {}", log_path.display(), e)
+    })?;
+    let log_file2 = log_file.try_clone().unwrap();
+    cmd.stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file2));
+
+    match run_cancellable(cmd, "STAR genomeGenerate") {
+        Ok(true) => {
+            // Verify index was created
+            if genome_index_exists(genome_dir) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "STAR genomeGenerate completed but index files not found in {}\n  \
+                     Check log: {}",
+                    genome_dir.display(),
+                    log_path.display()
+                ))
+            }
+        }
+        Ok(false) => Err(format!(
+            "STAR genomeGenerate failed.\n  \
+             Check log: {}\n  \
+             Common causes: insufficient RAM, disk space, or invalid FASTA/GTF files.",
+            log_path.display()
+        )),
+        Err(e) => Err(e),
+    }
+}
+
 // ─── Environment validation ──────────────────────────────────────────────────
 
 pub(crate) fn validate_environment(config: &Config) -> Result<(), String> {
@@ -439,18 +552,14 @@ pub(crate) fn validate_environment(config: &Config) -> Result<(), String> {
     if !config.genome_dir.exists() {
         return Err(format!(
             "STAR genome dir not found: {}\n  \
-             Hint: Specify with --genome-dir /path/to/star/index",
+             Hint: Specify with --genome-dir /path/to/star/index\n  \
+             Or place a reference FASTA (.fa/.fna/.fasta) in the directory for auto-indexing.",
             config.genome_dir.display()
         ));
     }
-    let genome_file = config.genome_dir.join("Genome");
-    if !genome_file.exists() {
-        return Err(format!(
-            "STAR genome index incomplete (no 'Genome' file in {})\n  \
-             Hint: Did you run STAR --runMode genomeGenerate?",
-            config.genome_dir.display()
-        ));
-    }
+
+    // Genome index check is deferred to ensure_genome_index() in main —
+    // if a FASTA is present, we can auto-generate the index.
 
     if !config.gtf.exists() {
         return Err(format!(
@@ -488,6 +597,41 @@ pub(crate) fn validate_environment(config: &Config) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+/// Ensure STAR genome index exists. If not, detect a FASTA file and generate it.
+/// Returns Ok(()) if the index is ready, Err if it cannot be created.
+pub(crate) fn ensure_genome_index(config: &Config) -> Result<(), String> {
+    if genome_index_exists(&config.genome_dir) {
+        return Ok(());
+    }
+
+    // No index found — look for a FASTA file to generate from
+    let fasta_path = find_fasta_in_dir(&config.genome_dir).ok_or_else(|| {
+        format!(
+            "STAR genome index not found in {} and no reference FASTA \
+             (.fa, .fna, .fasta) detected for auto-indexing.\n  \
+             Hint: Place your reference genome FASTA in --genome-dir, or run:\n  \
+             STAR --runMode genomeGenerate --genomeDir {} --genomeFastaFiles <ref.fa> \
+             --sjdbGTFfile <annotation.gtf>",
+            config.genome_dir.display(),
+            config.genome_dir.display()
+        )
+    })?;
+
+    info!(
+        "STAR genome index not found. Detected FASTA: {}",
+        fasta_path.display()
+    );
+    info!(
+        "Generating genome index in {} (this may take 30-90 minutes for a human genome)...",
+        config.genome_dir.display()
+    );
+
+    generate_genome_index(config, &fasta_path)?;
+
+    info!("Genome index generated successfully.");
     Ok(())
 }
 

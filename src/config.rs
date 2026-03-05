@@ -104,6 +104,10 @@ pub(crate) fn find_samtools(star_env: &Path) -> Option<PathBuf> {
 // ─── Help ────────────────────────────────────────────────────────────────────
 
 pub(crate) fn usage() {
+    let (avail_ram, total_cpus) = detect_system_resources();
+    let (auto_jobs, auto_threads, auto_bam_sort) =
+        auto_config_resources(avail_ram, total_cpus, None);
+    let ram_gb = avail_ram as f64 / 1e9;
     eprintln!("star-rseqc v{VERSION}");
     eprintln!("STAR 2-pass alignment + RSeQC quality control for paired-end RNA-seq");
     eprintln!();
@@ -129,6 +133,9 @@ pub(crate) fn usage() {
     eprintln!("    Samples are processed in parallel with a full-screen progress TUI.");
     eprintln!("    Resume-aware: re-run the same command to skip completed samples.");
     eprintln!();
+    eprintln!("    If --genome-dir contains a FASTA file (.fa/.fna/.fasta) but no");
+    eprintln!("    STAR index, the index is automatically generated before alignment.");
+    eprintln!();
     eprintln!("    On first run, automatically converts the GTF annotation to BED12");
     eprintln!("    format required by RSeQC (cached for subsequent runs).");
     eprintln!();
@@ -139,10 +146,15 @@ pub(crate) fn usage() {
     eprintln!("    -o, --output <DIR>        Output directory for all results");
     eprintln!("                              [default: star-rseqc-results]");
     eprintln!("    -j, --jobs <N>            Samples processed in parallel");
-    eprintln!("                              [default: auto-detected from available RAM]");
+    eprintln!(
+        "                              [default: {auto_jobs} (auto: {total_cpus} CPUs, {ram_gb:.0} GB RAM)]"
+    );
     eprintln!("    -t, --threads <N>         Threads per STAR alignment job");
-    eprintln!("                              [default: auto-detected from CPU count]");
+    eprintln!(
+        "                              [default: {auto_threads} (auto: {total_cpus} CPUs / {auto_jobs} jobs)]"
+    );
     eprintln!("    --genome-dir <DIR>        STAR genome index directory");
+    eprintln!("                              (auto-generates index if FASTA found but no index)");
     eprintln!("    --gtf <FILE>              GTF annotation file");
     eprintln!("    --bed <FILE>              Pre-built BED12 file for RSeQC");
     eprintln!("                              (auto-generated next to GTF file if omitted)");
@@ -150,7 +162,10 @@ pub(crate) fn usage() {
     eprintln!("    --star-env <DIR>          STAR conda environment prefix (or 'auto')");
     eprintln!("    --rseqc-env <DIR>         RSeQC conda environment prefix (or 'auto')");
     eprintln!("    --bam-sort-ram <BYTES>    RAM limit for BAM sorting");
-    eprintln!("                              [default: auto-detected from available RAM]");
+    eprintln!(
+        "                              [default: {:.1} GB (auto)]",
+        auto_bam_sort as f64 / 1e9
+    );
     eprintln!("    --r1-suffix <SUFFIX>      Read 1 filename suffix before .fastq.gz");
     eprintln!("                              [default: _1P]  (e.g. _R1, _1)");
     eprintln!("    --r2-suffix <SUFFIX>      Read 2 filename suffix before .fastq.gz");
@@ -197,8 +212,16 @@ pub(crate) fn usage() {
     eprintln!("    star-rseqc ./  --star-extra-args \"--outFilterMultimapNmax 20\"");
     eprintln!();
     eprintln!("NOTE:");
-    eprintln!("    Resources (-j, -t, --bam-sort-ram) are auto-detected from system RAM");
-    eprintln!("    and CPU count at startup. Override with explicit flags.");
+    eprintln!(
+        "    Resources auto-detected: {total_cpus} CPUs, {ram_gb:.1} GB RAM available."
+    );
+    eprintln!(
+        "    Auto plan: {auto_jobs} jobs x {auto_threads} threads = {} cores, {:.1} GB BAM sort/job.",
+        auto_jobs * auto_threads,
+        auto_bam_sort as f64 / 1e9
+    );
+    eprintln!("    STAR genome index RAM is detected from --genome-dir and excluded.");
+    eprintln!("    Override with -j, -t, --bam-sort-ram if needed.");
     eprintln!("    Press Ctrl+C to gracefully cancel (waits for running jobs).");
 }
 
@@ -230,14 +253,117 @@ pub(crate) fn detect_system_resources() -> (u64, usize) {
     (ram, cpus)
 }
 
-pub(crate) fn auto_config_resources(available_ram: u64, total_cpus: usize) -> (usize, usize, u64) {
-    const PER_JOB_RAM: u64 = 6_000_000_000; // 6 GB per job max
-    const OS_BUFFER: u64 = 2_000_000_000; // reserve for OS
-    let usable = available_ram.saturating_sub(OS_BUFFER);
-    let jobs = ((usable / PER_JOB_RAM) as usize).max(1);
-    let threads = (total_cpus / jobs).max(1);
-    let bam_sort = PER_JOB_RAM.min(usable / jobs as u64);
-    (jobs, threads, bam_sort)
+/// Estimate STAR genome index size by reading the `Genome` file.
+/// Returns 0 if the file doesn't exist or can't be read.
+fn estimate_genome_index_size(genome_dir: &Path) -> u64 {
+    // The `Genome` file is the largest component; SA and SAindex add ~50% more.
+    // Total shared memory footprint ≈ 2x the Genome file size.
+    let genome_file = genome_dir.join("Genome");
+    match fs::metadata(&genome_file) {
+        Ok(m) => {
+            let genome_bytes = m.len();
+            debug!(
+                "STAR Genome file: {:.1} GB -> estimated index footprint: {:.1} GB",
+                genome_bytes as f64 / 1e9,
+                (genome_bytes * 2) as f64 / 1e9
+            );
+            genome_bytes * 2 // Genome + SA + SAindex ≈ 2x Genome
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Compute optimal (jobs, threads, bam_sort_ram) from available system resources.
+///
+/// STAR resource model:
+/// - **Shared memory**: STAR genome index is mmap'd and shared across all jobs.
+///   For human GRCh38 this is ~27 GB. We detect this from the Genome file.
+/// - **Per-job RAM**: Each STAR 2-pass job needs:
+///   - BAM sort buffer (`--limitBAMsortRAM`, the main knob)
+///   - Thread-local alignment buffers (~200 MB per thread)
+///   - 2-pass intermediate data (~500 MB)
+///   - RSeQC QC steps later (~500 MB)
+/// - **OS reserve**: 2 GB for system, filesystem cache, etc.
+///
+/// Formula:
+///   usable_ram = available_ram - genome_index - os_reserve
+///   per_job_ram = bam_sort_ram + (threads * 200 MB) + 1 GB overhead
+///   max_by_ram = usable_ram / per_job_ram
+///   max_by_cpu = total_cpus / min_threads  (STAR needs ≥4 threads to be efficient)
+///   jobs = min(max_by_ram, max_by_cpu)
+///
+/// Returns (parallel_jobs, threads_per_job, bam_sort_ram).
+pub(crate) fn auto_config_resources(
+    available_ram: u64,
+    total_cpus: usize,
+    genome_dir: Option<&Path>,
+) -> (usize, usize, u64) {
+    const OS_BUFFER: u64 = 2_000_000_000; // 2 GB for OS
+    const DEFAULT_GENOME_INDEX: u64 = 32_000_000_000; // 32 GB fallback (human genome)
+    const MIN_THREADS: usize = 4; // STAR needs ≥4 threads to be efficient
+    const THREAD_BUFFER: u64 = 200_000_000; // ~200 MB per thread
+    const JOB_OVERHEAD: u64 = 1_000_000_000; // 1 GB for 2-pass data + RSeQC
+    const MIN_BAM_SORT: u64 = 2_000_000_000; // 2 GB minimum BAM sort
+    const MAX_BAM_SORT: u64 = 10_000_000_000; // 10 GB maximum BAM sort
+
+    // Detect genome index size, or use a conservative default
+    let genome_index = genome_dir
+        .map(estimate_genome_index_size)
+        .filter(|&s| s > 0)
+        .unwrap_or(DEFAULT_GENOME_INDEX);
+
+    let usable_ram = available_ram
+        .saturating_sub(genome_index)
+        .saturating_sub(OS_BUFFER);
+
+    if usable_ram == 0 {
+        // Not enough RAM detected; return minimum viable config
+        info!(
+            "Low RAM detected ({:.1} GB available, {:.1} GB genome index). Using minimum config.",
+            available_ram as f64 / 1e9,
+            genome_index as f64 / 1e9
+        );
+        return (1, total_cpus.max(1), MIN_BAM_SORT);
+    }
+
+    // Start with max jobs by CPU (STAR needs MIN_THREADS per job)
+    let max_by_cpu = (total_cpus / MIN_THREADS).max(1);
+
+    // For each candidate job count, calculate per-job RAM budget
+    // and find the highest job count that fits in RAM
+    let mut best_jobs = 1;
+    let mut best_threads = total_cpus;
+    let mut best_bam_sort = MIN_BAM_SORT;
+
+    for candidate_jobs in 1..=max_by_cpu {
+        let threads = total_cpus / candidate_jobs;
+        if threads < MIN_THREADS {
+            break;
+        }
+
+        let per_job_overhead = (threads as u64) * THREAD_BUFFER + JOB_OVERHEAD;
+        let ram_for_bam_sort = (usable_ram / candidate_jobs as u64).saturating_sub(per_job_overhead);
+
+        if ram_for_bam_sort >= MIN_BAM_SORT {
+            best_jobs = candidate_jobs;
+            best_threads = threads;
+            best_bam_sort = ram_for_bam_sort.min(MAX_BAM_SORT);
+        }
+    }
+
+    debug!(
+        "Resource plan: {:.0} GB available - {:.0} GB genome - {:.0} GB OS = {:.0} GB usable \
+         -> {} jobs x {} threads, {:.1} GB BAM sort",
+        available_ram as f64 / 1e9,
+        genome_index as f64 / 1e9,
+        OS_BUFFER as f64 / 1e9,
+        usable_ram as f64 / 1e9,
+        best_jobs,
+        best_threads,
+        best_bam_sort as f64 / 1e9,
+    );
+
+    (best_jobs, best_threads, best_bam_sort)
 }
 
 // ─── Config & Args ───────────────────────────────────────────────────────────
@@ -419,13 +545,15 @@ pub(crate) fn parse_args() -> Option<Config> {
         parallel_jobs.is_none() || threads_per_sample.is_none() || bam_sort_ram.is_none();
     let (parallel_jobs, threads_per_sample, bam_sort_ram) = if resources_auto {
         let (avail_ram, total_cpus) = detect_system_resources();
-        let (aj, at, ab) = auto_config_resources(avail_ram, total_cpus);
+        let gd = genome_dir.as_deref().filter(|p| p.exists());
+        let (aj, at, ab) = auto_config_resources(avail_ram, total_cpus, gd);
         info!(
-            "Auto-detected resources: {} GB RAM, {} CPUs -> {} jobs x {} threads",
-            avail_ram / 1_000_000_000,
+            "Auto-detected resources: {:.1} GB RAM, {} CPUs -> {} jobs x {} threads, {:.1} GB BAM sort",
+            avail_ram as f64 / 1e9,
             total_cpus,
             parallel_jobs.unwrap_or(aj),
-            threads_per_sample.unwrap_or(at)
+            threads_per_sample.unwrap_or(at),
+            bam_sort_ram.unwrap_or(ab) as f64 / 1e9,
         );
         (
             parallel_jobs.unwrap_or(aj),

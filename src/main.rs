@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use checkpoint::{check_resume, checkpoint_dir, ResumeStatus};
 use config::VERSION;
-use pipeline::{process_sample, run_work_queue, validate_environment, write_summary_files};
+use pipeline::{
+    ensure_genome_index, process_sample, run_work_queue, validate_environment, write_summary_files,
+};
 use sample::discover_samples;
 use tui::{DisplayThread, ProgressState};
 
@@ -50,6 +52,14 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     info!("Environment OK.");
+
+    // ── Ensure genome index exists (auto-generate from FASTA if needed) ──
+    if !config.skip_alignment {
+        if let Err(e) = ensure_genome_index(&config) {
+            error!("Genome index check failed:\n  {e}");
+            return ExitCode::FAILURE;
+        }
+    }
     info!(
         "Resources: {} job(s) x {} thread(s)/job, {:.1} GB BAM sort RAM{}",
         config.parallel_jobs,
