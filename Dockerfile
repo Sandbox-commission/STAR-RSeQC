@@ -53,7 +53,7 @@ RUN micromamba create -y -n star \
 RUN micromamba create -y -n rseqc \
     -c bioconda \
     -c conda-forge \
-    "rseqc>=5.0" \
+    rseqc=5.0.4 \
     python \
     && micromamba clean --all -y
 

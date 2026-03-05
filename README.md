@@ -201,7 +201,7 @@ curl -fsSL https://raw.githubusercontent.com/Sandbox-commission/STAR-RSeQC/main/
 2. **Create conda environments:**
    ```bash
    mamba create -n star -c bioconda -c conda-forge star=2.7.11b samtools
-   mamba create -n rseqc -c bioconda -c conda-forge rseqc python
+   mamba create -n rseqc -c bioconda -c conda-forge rseqc=5.0.4 python
    ```
 
 3. **Create config file:**

@@ -311,6 +311,22 @@ install_conda_manual() {
 
 setup_environments() {
     local CONDA_ROOT="$1"
+
+    # Check available RAM — mamba needs ~4 GB to solve and extract packages
+    local mem_kb
+    mem_kb=$(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{print $2}')
+    if [[ -n "$mem_kb" ]] && (( mem_kb < 3500000 )); then
+        local mem_gb=$(( mem_kb / 1024 / 1024 ))
+        log_error "Low memory detected: ~${mem_gb} GB available (need at least 4 GB)"
+        echo -e "  Mamba may crash with ${RED}std::bad_alloc${NC} during package installation."
+        echo -e "  Close other applications to free memory, or use a machine with more RAM."
+        echo
+        read -p "$(echo -e ${YELLOW})Continue anyway? [y/N] $(echo -e ${NC})" -r
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+
     log_step "1/6" "Creating STAR environment..."
     if "$CONDA_ROOT/bin/mamba" env list 2>/dev/null | grep -q "envs/star$"; then
         log_success "STAR environment already exists, skipping"
@@ -326,7 +342,7 @@ setup_environments() {
     if "$CONDA_ROOT/bin/mamba" env list 2>/dev/null | grep -q "envs/rseqc$"; then
         log_success "RSeQC environment already exists, skipping"
     else
-        if ! "$CONDA_ROOT/bin/mamba" create -n rseqc -c bioconda -c conda-forge "rseqc>=5.0" python -y; then
+        if ! "$CONDA_ROOT/bin/mamba" create -n rseqc -c bioconda -c conda-forge rseqc=5.0.4 python -y; then
             log_error "Failed to create RSeQC environment"
             exit 1
         fi
@@ -390,7 +406,7 @@ setup_manual() {
     echo
     echo -e "${BLUE}Step 2: Create Environments${NC}"
     echo "  mamba create -n star -c bioconda -c conda-forge star=2.7.11b samtools"
-    echo "  mamba create -n rseqc -c bioconda -c conda-forge rseqc python"
+    echo "  mamba create -n rseqc -c bioconda -c conda-forge rseqc=5.0.4 python"
     echo
     echo -e "${BLUE}Step 3: Build STAR-RSeQC${NC}"
     echo "  git clone https://github.com/Sandbox-commission/STAR-RSeQC.git"
