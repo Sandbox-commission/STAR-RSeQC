@@ -193,10 +193,7 @@ fn main() -> ExitCode {
     if config.dry_run {
         println!();
         println!("Dry run — {} samples discovered:\n", all_samples.len());
-        println!(
-            "  {:<25} {:<50} {}",
-            "SAMPLE", "R1", "STATUS"
-        );
+        println!("  {:<25} {:<50} STATUS", "SAMPLE", "R1");
         println!("  {}", "-".repeat(90));
         for s in &all_samples {
             let status = match check_resume(&config.output_dir, &s.name) {

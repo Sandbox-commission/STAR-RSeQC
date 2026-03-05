@@ -442,10 +442,7 @@ pub(crate) fn find_fasta_in_dir(dir: &Path) -> Option<PathBuf> {
 ///       --sjdbGTFfile <gtf> --runThreadN <threads>
 ///
 /// This is a long-running operation (30-90 min for human genome).
-pub(crate) fn generate_genome_index(
-    config: &Config,
-    fasta_path: &Path,
-) -> Result<(), String> {
+pub(crate) fn generate_genome_index(config: &Config, fasta_path: &Path) -> Result<(), String> {
     let star_bin = config.star_env.join("bin/STAR");
     let genome_dir = &config.genome_dir;
 
@@ -480,9 +477,8 @@ pub(crate) fn generate_genome_index(
 
     // Log to file in genome_dir
     let log_path = genome_dir.join("genomeGenerate.log");
-    let log_file = File::create(&log_path).map_err(|e| {
-        format!("Cannot create log file {}: {}", log_path.display(), e)
-    })?;
+    let log_file = File::create(&log_path)
+        .map_err(|e| format!("Cannot create log file {}: {}", log_path.display(), e))?;
     let log_file2 = log_file.try_clone().unwrap();
     cmd.stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_file2));

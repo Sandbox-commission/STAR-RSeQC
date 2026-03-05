@@ -212,9 +212,7 @@ pub(crate) fn usage() {
     eprintln!("    star-rseqc ./  --star-extra-args \"--outFilterMultimapNmax 20\"");
     eprintln!();
     eprintln!("NOTE:");
-    eprintln!(
-        "    Resources auto-detected: {total_cpus} CPUs, {ram_gb:.1} GB RAM available."
-    );
+    eprintln!("    Resources auto-detected: {total_cpus} CPUs, {ram_gb:.1} GB RAM available.");
     eprintln!(
         "    Auto plan: {auto_jobs} jobs x {auto_threads} threads = {} cores, {:.1} GB BAM sort/job.",
         auto_jobs * auto_threads,
@@ -342,7 +340,8 @@ pub(crate) fn auto_config_resources(
         }
 
         let per_job_overhead = (threads as u64) * THREAD_BUFFER + JOB_OVERHEAD;
-        let ram_for_bam_sort = (usable_ram / candidate_jobs as u64).saturating_sub(per_job_overhead);
+        let ram_for_bam_sort =
+            (usable_ram / candidate_jobs as u64).saturating_sub(per_job_overhead);
 
         if ram_for_bam_sort >= MIN_BAM_SORT {
             best_jobs = candidate_jobs;
