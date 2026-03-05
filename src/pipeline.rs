@@ -238,12 +238,7 @@ pub(crate) fn process_sample(
                 bed_path.to_str().unwrap(),
             ]);
             let output = cmd.output().map_err(|e| {
-                format!(
-                    "{}: Failed to run {}: {}",
-                    sample.name,
-                    script.display(),
-                    e
-                )
+                format!("{}: Failed to run {}: {}", sample.name, script.display(), e)
             })?;
             if output.status.success() {
                 fs::write(&strand_out, &output.stdout)
@@ -313,12 +308,7 @@ pub(crate) fn process_sample(
                 bed_path.to_str().unwrap(),
             ]);
             let output = cmd.output().map_err(|e| {
-                format!(
-                    "{}: Failed to run {}: {}",
-                    sample.name,
-                    script.display(),
-                    e
-                )
+                format!("{}: Failed to run {}: {}", sample.name, script.display(), e)
             })?;
             if output.status.success() {
                 fs::write(&readdist_out, &output.stdout)
@@ -483,10 +473,7 @@ pub(crate) fn validate_environment(config: &Config) -> Result<(), String> {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(first_line) = stdout.lines().next() {
                 // First line is like "samtools 1.21"
-                let version_str = first_line
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("");
+                let version_str = first_line.split_whitespace().nth(1).unwrap_or("");
                 let parts: Vec<&str> = version_str.split('.').collect();
                 let major: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let minor: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -564,9 +551,7 @@ pub(crate) fn write_summary_files(output_dir: &Path, samples: &[Sample]) {
                     .exists(),
                 gene_counts: star_dir.join(format!("{n}_ReadsPerGene.out.tab")).exists(),
                 splice_junctions: star_dir.join(format!("{n}_SJ.out.tab")).exists(),
-                chimeric_junction: star_dir
-                    .join(format!("{n}_Chimeric.out.junction"))
-                    .exists(),
+                chimeric_junction: star_dir.join(format!("{n}_Chimeric.out.junction")).exists(),
                 chimeric_sam: star_dir.join(format!("{n}_Chimeric.out.sam")).exists(),
                 strand_qc: qc_dir.join(format!("{n}.strand.txt")).exists(),
                 genebody_txt: qc_dir.join(format!("{n}.geneBodyCoverage.txt")).exists(),

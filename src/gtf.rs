@@ -22,6 +22,7 @@ pub(crate) fn gtf_to_bed12(gtf_path: &Path, bed_path: &Path) -> Result<usize, St
     let reader = BufReader::new(gtf_file);
 
     // Collect exons per transcript: (chrom, strand, Vec<(start, end)>)
+    #[allow(clippy::type_complexity)]
     let mut transcripts: HashMap<String, (String, String, Vec<(u64, u64)>)> = HashMap::new();
     let mut skipped_exons: usize = 0;
 

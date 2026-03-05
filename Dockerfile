@@ -1,7 +1,7 @@
 # STAR-RSeQC: Complete Bioinformatics Pipeline in a Container
 # Multi-stage build: compile in builder, minimal runtime image
 
-FROM ubuntu:22.04 as builder
+FROM ubuntu:22.04 AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -33,10 +33,12 @@ FROM mambaorg/micromamba:latest
 # Set working directory
 WORKDIR /data
 
-# Install system dependencies
+# Install system dependencies (micromamba image runs as non-root by default)
+USER root
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+USER $MAMBA_USER
 
 # Create conda environment for STAR
 ENV MAMBA_DOCKERFILE_WORKDIR=/data

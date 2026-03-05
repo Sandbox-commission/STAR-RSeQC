@@ -10,11 +10,7 @@ pub(crate) struct Sample {
     pub r2: PathBuf,
 }
 
-pub(crate) fn discover_samples(
-    fastq_dir: &Path,
-    r1_suffix: &str,
-    r2_suffix: &str,
-) -> Vec<Sample> {
+pub(crate) fn discover_samples(fastq_dir: &Path, r1_suffix: &str, r2_suffix: &str) -> Vec<Sample> {
     let pattern = fastq_dir
         .join(format!("*{r1_suffix}.fastq.gz"))
         .to_string_lossy()
@@ -42,11 +38,7 @@ pub(crate) fn discover_samples(
         let r2 = r1.parent().unwrap().join(&r2_name);
 
         if !r2.exists() {
-            warn!(
-                "Skipping {} — R2 not found ({})",
-                sample_name,
-                r2.display()
-            );
+            warn!("Skipping {} — R2 not found ({})", sample_name, r2.display());
             continue;
         }
 

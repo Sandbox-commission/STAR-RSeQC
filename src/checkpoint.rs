@@ -63,12 +63,8 @@ pub(crate) fn sha256_outputs(output_dir: &Path, sample_name: &str) -> SampleDige
         star_dir.join(format!("{sample_name}_Log.progress.out")),
         star_dir.join(format!("{sample_name}_Log.final.out")),
         star_dir.join(format!("{sample_name}_Aligned.sortedByCoord.out.bam")),
-        star_dir.join(format!(
-            "{sample_name}_Aligned.sortedByCoord.out.bam.bai"
-        )),
-        star_dir.join(format!(
-            "{sample_name}_Aligned.toTranscriptome.out.bam"
-        )),
+        star_dir.join(format!("{sample_name}_Aligned.sortedByCoord.out.bam.bai")),
+        star_dir.join(format!("{sample_name}_Aligned.toTranscriptome.out.bam")),
         star_dir.join(format!("{sample_name}_ReadsPerGene.out.tab")),
         star_dir.join(format!("{sample_name}_SJ.out.tab")),
         star_dir.join(format!("{sample_name}_Chimeric.out.junction")),
@@ -79,12 +75,8 @@ pub(crate) fn sha256_outputs(output_dir: &Path, sample_name: &str) -> SampleDige
         qc_dir.join(format!("{sample_name}.strand.txt")),
         qc_dir.join(format!("{sample_name}.geneBodyCoverage.txt")),
         qc_dir.join(format!("{sample_name}.geneBodyCoverage.r")),
-        qc_dir.join(format!(
-            "{sample_name}.geneBodyCoverage.curves.pdf"
-        )),
-        qc_dir.join(format!(
-            "{sample_name}.geneBodyCoverage.heatMap.pdf"
-        )),
+        qc_dir.join(format!("{sample_name}.geneBodyCoverage.curves.pdf")),
+        qc_dir.join(format!("{sample_name}.geneBodyCoverage.heatMap.pdf")),
         qc_dir.join(format!("{sample_name}.read_distribution.txt")),
     ];
 

@@ -183,7 +183,7 @@ fn main() -> ExitCode {
     if config.dry_run {
         println!();
         println!("Dry run — {} samples discovered:\n", all_samples.len());
-        println!("  {:<25} {:<50} {}", "SAMPLE", "R1", "STATUS");
+        println!("  {:<25} {:<50} {status}", "SAMPLE", "R1", status = "STATUS");
         println!("  {}", "-".repeat(90));
         for s in &all_samples {
             let status = match check_resume(&config.output_dir, &s.name) {
@@ -249,9 +249,7 @@ fn main() -> ExitCode {
         config.parallel_jobs,
         &phase_label,
     ));
-    state
-        .skipped
-        .store(already_done, Ordering::Relaxed);
+    state.skipped.store(already_done, Ordering::Relaxed);
     if already_done > 0 {
         state.add_event(format!(
             "  RESUME  {already_done} sample(s) already completed"
@@ -267,12 +265,9 @@ fn main() -> ExitCode {
         let result = process_sample(sample, config_ref, bed_ref, &state, slot);
         match &result {
             Ok(()) => {
-                let digests =
-                    checkpoint::sha256_outputs(&config_ref.output_dir, &sample.name);
+                let digests = checkpoint::sha256_outputs(&config_ref.output_dir, &sample.name);
                 checkpoint::write_checkpoint(&config_ref.output_dir, &sample.name, &digests);
-                state
-                    .completed
-                    .fetch_add(1, Ordering::Relaxed);
+                state.completed.fetch_add(1, Ordering::Relaxed);
                 state.add_event(format!(
                     "  DONE  {} — star:{}... rseqc:{}...",
                     sample.name,

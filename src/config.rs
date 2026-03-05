@@ -182,7 +182,9 @@ pub(crate) fn usage() {
     eprintln!("    --alignMatesGapMax 1000000        Max mate pair gap");
     eprintln!();
     eprintln!("    Override or extend with --star-extra-args:");
-    eprintln!("        --star-extra-args \"--outFilterMultimapNmax 20 --winAnchorMultimapNmax 50\"");
+    eprintln!(
+        "        --star-extra-args \"--outFilterMultimapNmax 20 --winAnchorMultimapNmax 50\""
+    );
     eprintln!();
     eprintln!("EXAMPLES:");
     eprintln!("    star-rseqc ./");
@@ -207,7 +209,7 @@ pub(crate) fn read_available_ram() -> u64 {
         return 0;
     };
     let reader = BufReader::new(file);
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         if let Some(rest) = line.strip_prefix("MemAvailable:") {
             let kib: u64 = rest
                 .split_whitespace()
