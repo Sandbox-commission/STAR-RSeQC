@@ -55,6 +55,7 @@ star-rseqc /path/to/fastq/directory
 - [Example Output](#example-output)
   - [Understanding your QC results](#understanding-your-qc-results)
 - [Architecture](#architecture)
+- [References](#references)
 - [License](#license)
 
 ---
@@ -69,8 +70,7 @@ star-rseqc /path/to/fastq/directory
   needed; the annotation is converted automatically on first run and cached
 - **Full-screen TUI** — real-time progress monitor with per-sample spinners,
   overall progress bar, active job slots, elapsed/ETA timers, and a scrolling
-  activity log (built with `crossterm`, matching the style of
-  [msi-calc](https://github.com/your-repo/msi-calc))
+  activity log (built with `crossterm`)
 - **Directory-wise SHA256 resume** — on completion, separate SHA256 digests are
   computed for STAR outputs (10 files) and RSeQC outputs (6 files); on re-run,
   digests are verified and only corrupted or incomplete samples are re-processed
@@ -758,16 +758,25 @@ main()
 ```
 
 Key design decisions:
-- **No `clap`** — hand-rolled argument parser matches the style of `msi-calc`
+- **No `clap`** — hand-rolled argument parser for minimal dependencies
 - **No `rayon`** — scoped thread work queue with `AtomicUsize` work-stealing
   gives fine-grained control over job slot assignment and TUI updates
-- **`crossterm` TUI** — alternate screen with raw mode, matching `msi-calc`'s
-  rendering pattern
+- **`crossterm` TUI** — alternate screen with raw mode for clean terminal rendering
 - **Streaming SHA256** — files are hashed in 64 KB chunks to handle large BAMs
   without loading them into memory
 - **Directory-wise digests** — two SHA256 hashes per sample (STAR + RSeQC)
   instead of one combined hash, enabling precise identification of which output
   directory was corrupted
+
+---
+
+## References
+
+If you use STAR-RSeQC in your research, please cite the underlying tools:
+
+- **STAR**: Dobin A, Davis CA, Schlesinger F, et al. *STAR: ultrafast universal RNA-seq aligner.* Bioinformatics. 2013;29(1):15-21. doi:[10.1093/bioinformatics/bts635](https://doi.org/10.1093/bioinformatics/bts635) | [PMID: 23104886](https://pubmed.ncbi.nlm.nih.gov/23104886/)
+
+- **RSeQC**: Wang L, Wang S, Li W. *RSeQC: quality control of RNA-seq experiments.* Bioinformatics. 2012;28(16):2184-2185. doi:[10.1093/bioinformatics/bts356](https://doi.org/10.1093/bioinformatics/bts356) | [PMID: 22743226](https://pubmed.ncbi.nlm.nih.gov/22743226/)
 
 ---
 

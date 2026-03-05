@@ -138,7 +138,7 @@ install_docker_manual() {
     log_header "Manual Docker Installation"
     echo
     echo "Visit the official Docker installation guide:"
-    echo "  ${BLUE}https://docs.docker.com/engine/install/${NC}"
+    echo -e "  ${BLUE}https://docs.docker.com/engine/install/${NC}"
     echo
     echo "Installation steps:"
     echo "  1. Choose your operating system"
@@ -215,10 +215,10 @@ DOCKER_SCRIPT
     echo -e "${GREEN}✓ Docker setup complete!${NC}"
     echo
     echo "Usage:"
-    echo "  ${YELLOW}./docker-run.sh /path/to/fastq [output_dir]${NC}"
+    echo -e "  ${YELLOW}./docker-run.sh /path/to/fastq [output_dir]${NC}"
     echo
     echo "Or with docker-compose:"
-    echo "  ${YELLOW}FASTQ_DIR=/path/to/fastq docker-compose up${NC}"
+    echo -e "  ${YELLOW}FASTQ_DIR=/path/to/fastq docker-compose up${NC}"
     echo
 }
 
@@ -290,13 +290,13 @@ install_conda_manual() {
     echo
     echo "Choose your preferred conda distribution:"
     echo
-    echo "  ${BLUE}Miniforge (Recommended)${NC}"
+    echo -e "  ${BLUE}Miniforge (Recommended)${NC}"
     echo "    https://github.com/conda-forge/miniforge"
     echo
-    echo "  ${BLUE}Mambaforge${NC}"
+    echo -e "  ${BLUE}Mambaforge${NC}"
     echo "    https://github.com/conda-forge/miniforge"
     echo
-    echo "  ${BLUE}Miniconda${NC}"
+    echo -e "  ${BLUE}Miniconda${NC}"
     echo "    https://docs.conda.io/en/latest/miniconda.html"
     echo
     echo "Installation steps:"
@@ -386,10 +386,10 @@ EOF
     echo -e "${GREEN}✓ Mamba setup complete!${NC}"
     echo
     echo "Add to PATH:"
-    echo "  ${YELLOW}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
+    echo -e "  ${YELLOW}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
     echo
     echo "Run STAR-RSeQC:"
-    echo "  ${YELLOW}star-rseqc /path/to/fastq${NC}"
+    echo -e "  ${YELLOW}star-rseqc /path/to/fastq${NC}"
     echo
 }
 
