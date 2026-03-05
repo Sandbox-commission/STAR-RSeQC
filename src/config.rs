@@ -145,7 +145,7 @@ pub(crate) fn usage() {
     eprintln!("    --genome-dir <DIR>        STAR genome index directory");
     eprintln!("    --gtf <FILE>              GTF annotation file");
     eprintln!("    --bed <FILE>              Pre-built BED12 file for RSeQC");
-    eprintln!("                              (auto-generated from GTF if omitted)");
+    eprintln!("                              (auto-generated next to GTF file if omitted)");
     eprintln!("    --samtools <PATH>         Path to samtools binary");
     eprintln!("    --star-env <DIR>          STAR conda environment prefix (or 'auto')");
     eprintln!("    --rseqc-env <DIR>         RSeQC conda environment prefix (or 'auto')");

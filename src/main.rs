@@ -98,7 +98,7 @@ fn main() -> ExitCode {
         }
         bed.clone()
     } else {
-        let auto_bed = config.output_dir.join("annotation.bed12");
+        let auto_bed = config.gtf.with_extension("bed12");
         if auto_bed.exists() {
             info!("Reusing cached BED12: {}", auto_bed.display());
         } else {

@@ -271,7 +271,7 @@ star-rseqc <FASTQ_DIR> [OPTIONS]
 | `-t, --threads <N>` | Threads allocated per STAR alignment job | `16` |
 | `--genome-dir <DIR>` | STAR genome index directory | (see defaults) |
 | `--gtf <FILE>` | GTF annotation file | (see defaults) |
-| `--bed <FILE>` | Pre-built BED12 file for RSeQC (auto-generated from GTF if omitted) | auto |
+| `--bed <FILE>` | Pre-built BED12 file for RSeQC (auto-generated next to GTF file if omitted) | auto |
 | `--samtools <PATH>` | Path to samtools binary | (see defaults) |
 | `--star-env <DIR>` | STAR conda environment prefix | (see defaults) |
 | `--rseqc-env <DIR>` | RSeQC conda environment prefix | (see defaults) |
@@ -365,7 +365,6 @@ the others):
 │   └── <sample>.star.log
 ├── .checkpoints/                            SHA256 checkpoint files
 │   └── <sample>.sha256
-├── annotation.bed12                         Auto-generated BED12 (cached)
 ├── pipeline_summary.json                    JSON summary of all samples
 └── pipeline_summary.tsv                     TSV summary of all samples
 ```
