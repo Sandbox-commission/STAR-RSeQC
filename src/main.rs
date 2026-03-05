@@ -194,10 +194,8 @@ fn main() -> ExitCode {
         println!();
         println!("Dry run — {} samples discovered:\n", all_samples.len());
         println!(
-            "  {:<25} {:<50} {status}",
-            "SAMPLE",
-            "R1",
-            status = "STATUS"
+            "  {:<25} {:<50} {}",
+            "SAMPLE", "R1", "STATUS"
         );
         println!("  {}", "-".repeat(90));
         for s in &all_samples {

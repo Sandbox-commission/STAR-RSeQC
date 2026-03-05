@@ -64,12 +64,14 @@ COPY --from=builder /build/target/release/star-rseqc /usr/local/bin/star-rseqc
 RUN mkdir -p $HOME/.config/star-rseqc
 
 # Set up environment activation
+USER root
 RUN echo '#!/bin/bash' > /entrypoint.sh && \
     echo 'set -e' >> /entrypoint.sh && \
     echo 'eval "$(micromamba shell hook --shell bash)"' >> /entrypoint.sh && \
     echo 'export PATH="/opt/conda/envs/star/bin:/opt/conda/envs/rseqc/bin:$PATH"' >> /entrypoint.sh && \
     echo 'exec "$@"' >> /entrypoint.sh && \
     chmod +x /entrypoint.sh
+USER $MAMBA_USER
 
 # Default command
 ENTRYPOINT ["/entrypoint.sh"]
