@@ -95,7 +95,7 @@ The STAR-RSeQC distribution package includes three independent installation path
 2. **Create mamba environments**
    ```bash
    mamba create -n star -c bioconda -c conda-forge star=2.7.11b samtools
-   mamba create -n rseqc -c bioconda -c conda-forge rseqc python
+   mamba create -n rseqc -c bioconda -c conda-forge rseqc=5.0.4 python
    ```
 
 3. **Build binary**
@@ -230,7 +230,7 @@ The `create-package.sh` script bundles everything:
 
 ```bash
 ./create-package.sh [VERSION]
-# Creates: STAR-RSeQC-0.1.0.zip
+# Creates: STAR-RSeQC-0.2.0.zip
 
 # Contents:
 #   ├── star-rseqc (binary)
@@ -243,8 +243,8 @@ The `create-package.sh` script bundles everything:
 ```
 
 **Distribution:**
-1. Users download `STAR-RSeQC-0.1.0.zip`
-2. Extract: `unzip STAR-RSeQC-0.1.0.zip`
+1. Users download `STAR-RSeQC-0.2.0.zip`
+2. Extract: `unzip STAR-RSeQC-0.2.0.zip`
 3. Run: `bash setup.sh`
 4. Choose their preferred path
 

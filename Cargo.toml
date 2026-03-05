@@ -3,6 +3,7 @@ name = "star-rseqc"
 version = "0.2.0"
 edition = "2021"
 description = "STAR 2-pass alignment + RSeQC QC pipeline for paired-end RNA-seq"
+license = "MIT"
 
 [[bin]]
 name = "star-rseqc"

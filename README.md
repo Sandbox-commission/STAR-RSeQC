@@ -468,7 +468,7 @@ star-rseqc /data/Paired/ -o results
 
 # If some QC files were accidentally deleted:
 star-rseqc /data/Paired/ -o results
-# Output: RSeQC changed: 103N_GBC (was fedcba987654..., now 1234abcd5678...)
+# Output: RSeQC changed: SAMPLE1_CONTROL (was fedcba987654..., now 1234abcd5678...)
 #         1 sample(s) have corrupted/changed outputs — will re-process.
 ```
 
@@ -480,25 +480,29 @@ The pipeline features a full-screen terminal interface built with `crossterm`:
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
-║  star-rseqc v0.1.0  │  STAR + RSeQC RNA-seq Pipeline             ║
+║  STAR-RSeQC v0.2.0                                               ║
+║  STAR 2-Pass Alignment + RSeQC Quality Control | Paired-End      ║
 ╠══════════════════════════════════════════════════════════════════╣
-║  Phase: Processing samples                                       ║
+║  STAR 2-pass + RSeQC (24 samples, 2x16t [auto])                 ║
 ║                                                                  ║
-║  Overall: ██████████████░░░░░░░░░░░░░░░░  12/24  (50.0%)         ║
-║  Elapsed: 02:34:15  │  ETA: ~02:30:00                            ║
+║  OVERALL PROGRESS                                                ║
+║  ██████████████░░░░░░░░░░░░░░░░  50%                             ║
+║  12/24 done   Elapsed: 02:34:15   ETA: 02:30:00   Speed: 0.1/min║
+╠══════════════════════════════════════════════════════════════════╣
+║  ACTIVE JOBS (2/2)                                               ║
+║  | SAMPLE1_CONTROL       [STAR alignment] 12:34 / ~25:00        ║
+║    ████████████████░░░░░░░░░░░░░░░░░░░░  50%                     ║
+║  / SAMPLE1_CASE          [RSeQC: gene body coverage] 02:11      ║
+║    ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░   8%                     ║
+╠══════════════════════════════════════════════════════════════════╣
+║  Completed: 10   Skipped: 2   Failed: 0   Remaining: 12         ║
+╠══════════════════════════════════════════════════════════════════╣
+║  RECENT ACTIVITY                                                 ║
+║  DONE  SAMPLE1_CONTROL — star:a1b2c3d4e5f6… rseqc:7890abcdef12… ║
+║  DONE  SAMPLE1_CONTROL — STAR alignment                         ║
+║  DONE  SAMPLE1_CONTROL — samtools index                         ║
 ║                                                                  ║
-║  ── Active Jobs ──                                               ║
-║  ⠋ [1] 103T_GBC     STAR alignment          (12m 34s)            ║
-║  ⠹ [2] 104N_CRC     RSeQC: gene body cov.   (02m 11s)            ║
-║                                                                  ║
-║  Completed: 10  │  Skipped: 2  │  Failed: 0                      ║
-║                                                                  ║
-║  ── Recent Activity ──                                           ║
-║    DONE  SAMPLE1_CONTROL — star:a1b2c3d4e5f6… rseqc:7890abcdef12…║
-║    DONE  SAMPLE1_CONTROL — STAR alignment                        ║
-║    DONE  SAMPLE1_CONTROL — samtools index                        ║
-║                                                                  ║
-║  Press Ctrl+C to cancel gracefully                               ║
+║  Ctrl+C to cancel                            Updated: 14:32:15  ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
@@ -769,4 +773,4 @@ Key design decisions:
 
 ## License
 
-Internal tool. Not yet published under an open-source license.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

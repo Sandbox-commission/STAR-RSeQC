@@ -4,8 +4,8 @@
 
 ```bash
 # Extract package
-unzip STAR-RSeQC-0.1.0.zip
-cd STAR-RSeQC-0.1.0
+unzip STAR-RSeQC-0.2.0.zip
+cd STAR-RSeQC-0.2.0
 
 # Run installer
 bash setup.sh
@@ -61,7 +61,7 @@ bash setup.sh
 ## File Structure
 
 ```
-STAR-RSeQC-0.1.0/
+STAR-RSeQC-0.2.0/
 ├── setup.sh                 ← Run this first
 ├── star-rseqc              ← Pre-compiled binary
 ├── docker/
@@ -191,8 +191,8 @@ See `docs/TROUBLESHOOTING.md` for more details.
 ## Package Creation (for maintainers)
 
 ```bash
-./create-package.sh 0.1.0
-# Creates: STAR-RSeQC-0.1.0.zip (480 KB)
+./create-package.sh 0.2.0
+# Creates: STAR-RSeQC-0.2.0.zip (480 KB)
 
 # Share with users:
 # 1. Upload ZIP to GitHub Releases
