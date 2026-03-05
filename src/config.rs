@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use log::{debug, info};
+use log::{debug, info, warn};
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -41,7 +41,17 @@ fn load_file_config() -> FileConfig {
         Some(path) => match fs::read_to_string(&path) {
             Ok(content) => {
                 debug!("Loaded config from {}", path.display());
-                serde_json::from_str(&content).unwrap_or_default()
+                match serde_json::from_str(&content) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        warn!(
+                            "Failed to parse config file {}: {} — using defaults",
+                            path.display(),
+                            e
+                        );
+                        FileConfig::default()
+                    }
+                }
             }
             Err(_) => FileConfig::default(),
         },
@@ -439,6 +449,23 @@ pub(crate) fn parse_args() -> Option<Config> {
 
     if !star_extra_args.is_empty() {
         info!("Extra STAR args: {:?}", star_extra_args);
+    }
+
+    if r1_suffix.is_empty() {
+        eprintln!("Error: --r1-suffix must be non-empty (e.g. _1P, _R1, _1)");
+        return None;
+    }
+    if r2_suffix.is_empty() {
+        eprintln!("Error: --r2-suffix must be non-empty (e.g. _2P, _R2, _2)");
+        return None;
+    }
+    if r1_suffix.contains('/') || r1_suffix.contains('\\') {
+        eprintln!("Error: --r1-suffix must not contain path separators");
+        return None;
+    }
+    if r2_suffix.contains('/') || r2_suffix.contains('\\') {
+        eprintln!("Error: --r2-suffix must not contain path separators");
+        return None;
     }
 
     if r1_suffix != "_1P" || r2_suffix != "_2P" {

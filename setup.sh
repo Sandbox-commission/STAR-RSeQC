@@ -180,6 +180,18 @@ if [[ ! -d "$FASTQ_DIR" ]]; then
     exit 1
 fi
 
+if [[ ! -d "$GENOME_DIR" ]]; then
+    echo "Error: GENOME_DIR not found: $GENOME_DIR"
+    echo "  Set GENOME_DIR=/path/to/star/index before running this script."
+    exit 1
+fi
+
+if [[ ! -d "$GTF_DIR" ]]; then
+    echo "Error: GTF_DIR not found: $GTF_DIR"
+    echo "  Set GTF_DIR=/path/to/gtf/directory before running this script."
+    exit 1
+fi
+
 mkdir -p "$OUTPUT_DIR"
 
 echo "Running STAR-RSeQC in Docker..."
@@ -300,12 +312,26 @@ install_conda_manual() {
 setup_environments() {
     local CONDA_ROOT="$1"
     log_step "1/6" "Creating STAR environment..."
-    "$CONDA_ROOT/bin/mamba" create -n star -c bioconda -c conda-forge star=2.7.11b samtools -y || true
-    log_success "STAR environment ready"
+    if "$CONDA_ROOT/bin/mamba" env list 2>/dev/null | grep -q "envs/star$"; then
+        log_success "STAR environment already exists, skipping"
+    else
+        if ! "$CONDA_ROOT/bin/mamba" create -n star -c bioconda -c conda-forge star=2.7.11b samtools -y; then
+            log_error "Failed to create STAR environment"
+            exit 1
+        fi
+        log_success "STAR environment ready"
+    fi
 
     log_step "2/6" "Creating RSeQC environment..."
-    "$CONDA_ROOT/bin/mamba" create -n rseqc -c bioconda -c conda-forge rseqc python -y || true
-    log_success "RSeQC environment ready"
+    if "$CONDA_ROOT/bin/mamba" env list 2>/dev/null | grep -q "envs/rseqc$"; then
+        log_success "RSeQC environment already exists, skipping"
+    else
+        if ! "$CONDA_ROOT/bin/mamba" create -n rseqc -c bioconda -c conda-forge "rseqc>=5.0" python -y; then
+            log_error "Failed to create RSeQC environment"
+            exit 1
+        fi
+        log_success "RSeQC environment ready"
+    fi
 
     log_step "3/6" "Finding samtools..."
     SAMTOOLS="$CONDA_ROOT/envs/star/bin/samtools"

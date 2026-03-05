@@ -3,6 +3,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
+use log::warn;
+
 fn extract_attribute(attrs: &str, key: &str) -> Option<String> {
     let search = format!("{} \"", key);
     if let Some(pos) = attrs.find(&search) {
@@ -21,6 +23,7 @@ pub(crate) fn gtf_to_bed12(gtf_path: &Path, bed_path: &Path) -> Result<usize, St
 
     // Collect exons per transcript: (chrom, strand, Vec<(start, end)>)
     let mut transcripts: HashMap<String, (String, String, Vec<(u64, u64)>)> = HashMap::new();
+    let mut skipped_exons: usize = 0;
 
     for line in reader.lines() {
         let line = line.map_err(|e| format!("Read error: {}", e))?;
@@ -40,7 +43,10 @@ pub(crate) fn gtf_to_bed12(gtf_path: &Path, bed_path: &Path) -> Result<usize, St
 
         let transcript_id = match extract_attribute(attrs, "transcript_id") {
             Some(id) if !id.is_empty() => id,
-            _ => continue,
+            _ => {
+                skipped_exons += 1;
+                continue;
+            }
         };
 
         transcripts
@@ -48,6 +54,14 @@ pub(crate) fn gtf_to_bed12(gtf_path: &Path, bed_path: &Path) -> Result<usize, St
             .or_insert_with(|| (chrom.to_string(), strand.to_string(), Vec::new()))
             .2
             .push((start, end));
+    }
+
+    if skipped_exons > 0 {
+        warn!(
+            "Skipped {} exon lines without transcript_id in {}",
+            skipped_exons,
+            gtf_path.display()
+        );
     }
 
     let out_file = File::create(bed_path)

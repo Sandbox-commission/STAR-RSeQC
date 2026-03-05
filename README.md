@@ -34,6 +34,7 @@ star-rseqc /path/to/fastq/directory
 - [Quick Install](#quick-install)
 - [Features](#features)
 - [Requirements](#requirements)
+- [Getting Reference Files](#getting-reference-files)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Usage](#usage)
@@ -50,6 +51,9 @@ star-rseqc /path/to/fastq/directory
 - [Terminal UI](#terminal-ui)
 - [Reference Configuration](#reference-configuration)
 - [Examples](#examples)
+- [Troubleshooting](#troubleshooting)
+- [Example Output](#example-output)
+  - [Understanding your QC results](#understanding-your-qc-results)
 - [Architecture](#architecture)
 - [License](#license)
 
@@ -97,6 +101,80 @@ star-rseqc /path/to/fastq/directory
 | Reference FASTA | Required only if building STAR index from scratch (optional) |
 
 All paths are stored in `~/.config/star-rseqc/config.json` and auto-detected or manually overridable via CLI flags.
+
+---
+
+## Getting Reference Files
+
+If you're new to bioinformatics, you'll need two things before running the pipeline:
+a **GTF annotation file** (tells STAR where genes are) and a **STAR genome index**
+(a pre-processed version of the genome that STAR can align reads against).
+
+### Step 1: Download genome and annotation
+
+Pick the organism you're working with. For **human (GRCh38)**:
+
+```bash
+# Create a directory for reference files
+mkdir -p ~/references && cd ~/references
+
+# Download the genome FASTA (DNA sequence, ~900 MB compressed)
+wget https://ftp.ensembl.org/pub/release-113/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+gunzip Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+
+# Download the GTF annotation (gene locations, ~50 MB compressed)
+wget https://ftp.ensembl.org/pub/release-113/gtf/homo_sapiens/Homo_sapiens.GRCh38.113.gtf.gz
+gunzip Homo_sapiens.GRCh38.113.gtf.gz
+```
+
+For **mouse (GRCm39)**, replace `homo_sapiens` with `mus_musculus` and
+`GRCh38` with `GRCm39` in the URLs above. For other organisms, browse
+https://ftp.ensembl.org/pub/release-113/.
+
+### Step 2: Build the STAR genome index
+
+This step takes 30-60 minutes and needs ~32 GB of RAM for the human genome.
+You only need to do this once.
+
+```bash
+# Activate the STAR conda environment
+conda activate star
+
+# Build the index (adjust --sjdbOverhang to your read length minus 1;
+# 100 works for most Illumina experiments with 101 bp reads)
+mkdir -p ~/references/star_index
+STAR --runMode genomeGenerate \
+     --genomeDir ~/references/star_index \
+     --genomeFastaFiles ~/references/Homo_sapiens.GRCh38.dna.primary_assembly.fa \
+     --sjdbGTFfile ~/references/Homo_sapiens.GRCh38.113.gtf \
+     --sjdbOverhang 100 \
+     --runThreadN 8
+
+conda deactivate
+```
+
+### Step 3: Run the pipeline
+
+```bash
+star-rseqc /path/to/your/fastq/files \
+    --genome-dir ~/references/star_index \
+    --gtf ~/references/Homo_sapiens.GRCh38.113.gtf
+```
+
+Or save these paths permanently so you don't need to type them every time:
+
+```bash
+mkdir -p ~/.config/star-rseqc
+cat > ~/.config/star-rseqc/config.json << EOF
+{
+  "genome_dir": "$HOME/references/star_index",
+  "gtf": "$HOME/references/Homo_sapiens.GRCh38.113.gtf"
+}
+EOF
+
+# Now just run:
+star-rseqc /path/to/your/fastq/files
+```
 
 ---
 
@@ -523,6 +601,136 @@ Each STAR job loads the full genome index (~32 GB for human) into shared memory.
 Multiple jobs share this memory, but each needs `--bam-sort-ram` (default 30 GB)
 for BAM sorting. Adjust `-j` and `-t` based on your system's available cores and
 RAM.
+
+---
+
+## Troubleshooting
+
+### STAR not found
+
+```
+STAR binary not found: /home/user/miniforge3/envs/star/bin/STAR
+```
+
+The `star` conda environment is missing or `--star-env` points to the wrong location. Fix:
+```bash
+mamba create -n star -c bioconda -c conda-forge star=2.7.11b samtools
+star-rseqc ./ --star-env auto
+```
+
+### samtools version too old
+
+```
+samtools version 1.9 detected; version 1.15+ is recommended.
+```
+
+Upgrade samtools in the STAR environment:
+```bash
+mamba install -n star -c bioconda -c conda-forge "samtools>=1.15"
+```
+
+### Docker socket errors
+
+```
+Cannot connect to the Docker daemon
+```
+
+If using the system Docker daemon (not Docker Desktop):
+```bash
+export DOCKER_HOST="unix:///var/run/docker.sock"
+```
+Or ensure Docker is running: `sudo systemctl start docker`
+
+### Resume behavior
+
+The pipeline uses SHA256 checksums over output files to detect completed samples. If outputs are accidentally deleted or corrupted, the pipeline will detect the change and re-process those samples automatically. To force a full re-run, delete the `.checkpoints/` directory inside the output folder.
+
+### GTF conversion failures
+
+```
+GTF->BED12 produced zero transcripts
+```
+
+This usually means the GTF file is empty, truncated, or uses a non-standard format. Verify your GTF file contains lines with feature type `exon` and a `transcript_id` attribute. Alternatively, provide a pre-built BED12 file with `--bed`.
+
+### Permission errors
+
+If output files can't be written, check that you have write permissions on the output directory. In Docker, ensure the mounted volumes have correct permissions and the `user:` setting in `docker-compose.yml` matches your host UID/GID (default `1000:1000`).
+
+---
+
+## Example Output
+
+### pipeline_summary.json
+
+After a successful run, `pipeline_summary.json` contains one entry per sample:
+
+```json
+[
+  {
+    "sample": "SAMPLE1_CONTROL",
+    "sha256": "star:a1b2c3d4e5f67890|rseqc:fedcba9876543210",
+    "log_final": true,
+    "bam_sorted": true,
+    "bam_index": true,
+    "bam_transcriptome": true,
+    "gene_counts": true,
+    "splice_junctions": true,
+    "chimeric_junction": true,
+    "chimeric_sam": true,
+    "strand_qc": true,
+    "genebody_txt": true,
+    "genebody_r": true,
+    "genebody_curves_pdf": true,
+    "genebody_heatmap_pdf": true,
+    "readdist_qc": true
+  }
+]
+```
+
+### Understanding your QC results
+
+After the pipeline finishes, check the files in the `qc/` folder. Here's what
+each one tells you and what "good" vs "bad" looks like:
+
+#### Strandedness (`*.strand.txt`)
+
+This tells you whether your RNA library was prepared with strand information.
+
+| Result | Meaning |
+|--------|---------|
+| "1++,1--,2+-,2-+" fraction **> 0.8** | **Stranded** (sense) — this is normal for most modern kits (e.g. Illumina TruSeq Stranded) |
+| "1+-,1-+,2++,2--" fraction **> 0.8** | **Reverse-stranded** — also normal, depends on the kit used |
+| Both fractions **near 0.5** | **Unstranded** — older protocols or some poly-A kits; still fine for gene-level analysis |
+
+If you're unsure what to expect, ask whoever prepared the RNA library which kit they used.
+
+#### Gene body coverage (`*.geneBodyCoverage.txt` and `*.curves.pdf`)
+
+Open the PDF — it shows a curve from the 5' end (start) to the 3' end (end) of genes.
+
+| Shape | Meaning |
+|-------|---------|
+| **Flat/even curve** | Good — RNA was intact when sequenced |
+| **Strong drop-off at the 5' end** (left side lower) | RNA may be degraded — the 3' end is preserved but the 5' end is lost. Common in old or poorly stored samples |
+| **Spike at one end only** | Possible bias in library preparation |
+
+Moderate 3' bias is common and usually acceptable. A severe drop (5' signal less than half of 3') suggests degradation that may affect downstream analysis.
+
+#### Read distribution (`*.read_distribution.txt`)
+
+This shows where your reads mapped across the genome.
+
+| Region | Typical good result | Concern if... |
+|--------|-------------------|---------------|
+| **CDS exons** | 40-60% of reads | Very low (< 20%) — possible DNA contamination |
+| **UTR exons (5' and 3')** | 15-30% of reads | — |
+| **Introns** | 10-25% of reads | Very high (> 50%) — may indicate DNA contamination or pre-mRNA |
+| **Intergenic** | < 10% of reads | Very high (> 30%) — possible DNA contamination or poor rRNA depletion |
+
+**In plain language:** most reads should land on known gene regions (exons).
+If a large fraction maps between genes (intergenic) or within gene bodies but
+not on exons (intronic), something may be off with the sample or library prep.
 
 ---
 

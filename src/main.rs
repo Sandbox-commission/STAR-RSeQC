@@ -20,6 +20,8 @@ use pipeline::{process_sample, run_work_queue, validate_environment, write_summa
 use sample::discover_samples;
 use tui::{DisplayThread, ProgressState};
 
+const HASH_DISPLAY_LEN: usize = 12;
+
 pub(crate) static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn is_cancelled() -> bool {
@@ -127,8 +129,8 @@ fn main() -> ExitCode {
                 warn!(
                     "STAR changed: {} (was {}..., now {}...)",
                     s.name,
-                    &old[..12.min(old.len())],
-                    &new[..12.min(new.len())]
+                    &old[..HASH_DISPLAY_LEN.min(old.len())],
+                    &new[..HASH_DISPLAY_LEN.min(new.len())]
                 );
                 output_changed += 1;
                 to_process.push(s);
@@ -137,8 +139,8 @@ fn main() -> ExitCode {
                 warn!(
                     "RSeQC changed: {} (was {}..., now {}...)",
                     s.name,
-                    &old[..12.min(old.len())],
-                    &new[..12.min(new.len())]
+                    &old[..HASH_DISPLAY_LEN.min(old.len())],
+                    &new[..HASH_DISPLAY_LEN.min(new.len())]
                 );
                 output_changed += 1;
                 to_process.push(s);
@@ -152,10 +154,10 @@ fn main() -> ExitCode {
                 warn!(
                     "STAR+RSeQC changed: {} (star: {}...->{}..., rseqc: {}...->{}...)",
                     s.name,
-                    &old_star[..12.min(old_star.len())],
-                    &new_star[..12.min(new_star.len())],
-                    &old_rseqc[..12.min(old_rseqc.len())],
-                    &new_rseqc[..12.min(new_rseqc.len())]
+                    &old_star[..HASH_DISPLAY_LEN.min(old_star.len())],
+                    &new_star[..HASH_DISPLAY_LEN.min(new_star.len())],
+                    &old_rseqc[..HASH_DISPLAY_LEN.min(old_rseqc.len())],
+                    &new_rseqc[..HASH_DISPLAY_LEN.min(new_rseqc.len())]
                 );
                 output_changed += 1;
                 to_process.push(s);
@@ -274,8 +276,8 @@ fn main() -> ExitCode {
                 state.add_event(format!(
                     "  DONE  {} — star:{}... rseqc:{}...",
                     sample.name,
-                    &digests.star[..12],
-                    &digests.rseqc[..12]
+                    &digests.star[..HASH_DISPLAY_LEN],
+                    &digests.rseqc[..HASH_DISPLAY_LEN]
                 ));
             }
             Err(e) if e == "Cancelled" => {

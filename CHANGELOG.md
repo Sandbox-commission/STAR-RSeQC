@@ -2,7 +2,7 @@
 
 All notable changes to STAR-RSeQC will be documented in this file.
 
-## [0.2.0] - 2026-03-03
+## [0.2.0] - 2025-03-03
 
 ### Added
 - **Flexible FASTQ naming**: `--r1-suffix` / `--r2-suffix` flags (default: `_1P`/`_2P`).

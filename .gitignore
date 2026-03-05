@@ -9,5 +9,4 @@ star-rseqc-results/
 *.fastq.gz
 .claude/
 config.json
-~/.config/star-rseqc/
 *.zip

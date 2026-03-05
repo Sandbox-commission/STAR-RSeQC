@@ -83,7 +83,8 @@ impl ProgressState {
     pub fn add_event(&self, msg: String) {
         if let Ok(mut events) = self.recent_events.lock() {
             events.push(msg);
-            if events.len() > 100 {
+            const MAX_EVENTS: usize = 100;
+            if events.len() > MAX_EVENTS {
                 events.remove(0);
             }
         }

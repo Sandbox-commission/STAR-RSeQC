@@ -477,6 +477,30 @@ pub(crate) fn validate_environment(config: &Config) -> Result<(), String> {
         ));
     }
 
+    // Check samtools version (warn only)
+    if let Ok(output) = Command::new(&config.samtools).arg("--version").output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(first_line) = stdout.lines().next() {
+                // First line is like "samtools 1.21"
+                let version_str = first_line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("");
+                let parts: Vec<&str> = version_str.split('.').collect();
+                let major: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+                let minor: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                if major < 1 || (major == 1 && minor < 15) {
+                    warn!(
+                        "samtools version {} detected; version 1.15+ is recommended. \
+                         Some features may not work correctly.",
+                        version_str
+                    );
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

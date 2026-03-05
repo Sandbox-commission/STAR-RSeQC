@@ -7,6 +7,7 @@ services:
       dockerfile: Dockerfile
     image: star-rseqc:latest
     container_name: star-rseqc-pipeline
+    command: star-rseqc /data/input -o /data/output
 
     # Mount volumes for data access
     volumes:

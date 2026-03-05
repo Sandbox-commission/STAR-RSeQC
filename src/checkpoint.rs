@@ -5,6 +5,8 @@ pub(crate) fn checkpoint_dir(output_dir: &Path) -> PathBuf {
     output_dir.join(".checkpoints")
 }
 
+const HASH_BUF_SIZE: usize = 65536;
+
 pub(crate) fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
@@ -12,7 +14,7 @@ pub(crate) fn sha256_file(path: &Path) -> Result<Vec<u8>, String> {
     let mut hasher = Sha256::new();
     let mut file = File::open(path)
         .map_err(|e| format!("Cannot open {} for hashing: {}", path.display(), e))?;
-    let mut buf = [0u8; 65536];
+    let mut buf = [0u8; HASH_BUF_SIZE];
     loop {
         let n = file
             .read(&mut buf)

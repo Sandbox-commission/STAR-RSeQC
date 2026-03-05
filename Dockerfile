@@ -16,12 +16,14 @@ RUN apt-get update && apt-get install -y \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Copy source code
+# Cache dependency build: copy manifests first, build with dummy src
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY src/ ./src/
+RUN mkdir src && echo 'fn main() {}' > src/main.rs
+RUN cargo build --release && rm -rf src target/release/deps/star_rseqc*
 
-# Build release binary
+# Copy real source and build
+COPY src/ ./src/
 RUN cargo build --release
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -49,7 +51,7 @@ RUN micromamba create -y -n star \
 RUN micromamba create -y -n rseqc \
     -c bioconda \
     -c conda-forge \
-    rseqc \
+    "rseqc>=5.0" \
     python \
     && micromamba clean --all -y
 
@@ -74,4 +76,4 @@ CMD ["star-rseqc", "-h"]
 # Labels
 LABEL maintainer="STAR-RSeQC"
 LABEL description="STAR 2-pass alignment + RSeQC QC pipeline"
-LABEL version="0.1.0"
+LABEL version="0.2.0"
