@@ -61,7 +61,7 @@ RUN micromamba create -y -n rseqc \
 COPY --from=builder /build/target/release/star-rseqc /usr/local/bin/star-rseqc
 
 # Create config directory
-RUN mkdir -p /root/.config/star-rseqc
+RUN mkdir -p $HOME/.config/star-rseqc
 
 # Set up environment activation
 RUN echo '#!/bin/bash' > /entrypoint.sh && \
