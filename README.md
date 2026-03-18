@@ -345,8 +345,8 @@ Files must follow this pattern:
 The sample name is everything before `_1P` or `_2P`:
 
 ```bash
-103N_GBC_1P.fastq.gz   →  sample = 103N_GBC
-50T_CRC_1P.fastq.gz    →  sample = 50T_CRC
+sample1_case_1P.fastq.gz     →  sample = sample1_case
+sample2_control_1P.fastq.gz  →  sample = sample2_control
 ```
 
 Both R1 and R2 must exist for a sample to be included. Sample names are

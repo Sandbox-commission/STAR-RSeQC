@@ -170,8 +170,8 @@ fn usage() {
     eprintln!("        <SAMPLE>_2P.fastq.gz   (read 2 / reverse)");
     eprintln!();
     eprintln!("    Sample name is everything before _1P / _2P, for example:");
-    eprintln!("        103N_GBC_1P.fastq.gz  ->  sample = 103N_GBC");
-    eprintln!("        50T_CRC_1P.fastq.gz   ->  sample = 50T_CRC");
+    eprintln!("        sample1_case_1P.fastq.gz     ->  sample = sample1_case");
+    eprintln!("        sample2_control_1P.fastq.gz  ->  sample = sample2_control");
     eprintln!();
     eprintln!("REFERENCE FILES:");
     eprintln!("    STAR index : --genome-dir or $STAR_RSEQC_GENOME_DIR");
