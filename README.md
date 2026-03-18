@@ -707,4 +707,4 @@ Key design decisions:
 
 ## License
 
-Internal tool. Not yet published under an open-source license.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
