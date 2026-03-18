@@ -17,6 +17,13 @@ GENOME_DIR=""
 GTF_FILE=""
 JOBS=""
 THREADS=""
+REF_SETUP_MODE=""
+REF_SOURCE_DIR=""
+REF_FASTA_FILE=""
+REF_READ_LENGTH="101"
+ENSEMBL_RELEASE="113"
+ENSEMBL_SPECIES="homo_sapiens"
+ENSEMBL_ASSEMBLY="GRCh38"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -52,6 +59,12 @@ Options:
   --gtf <FILE>                  GTF annotation file (host path)
   --jobs <N>                    Parallel jobs override for full run
   --threads <N>                 Threads override for full run
+  --ref-mode <existing|local|ensembl>
+                                Reference setup mode
+  --ref-source-dir <DIR>        For --ref-mode local: dir containing FASTA + GTF
+  --ref-fasta <FILE>            For --ref-mode local: genome FASTA/FA/FNA(.gz)
+  --read-length <N>             Read length (for STAR sjdbOverhang, default: 101)
+  --ensembl-release <N>         Ensembl release for download mode (default: 113)
   -h, --help                    Show this help
 USAGE
 }
@@ -95,6 +108,26 @@ parse_args() {
         THREADS="${2:-}"
         shift 2
         ;;
+      --ref-mode)
+        REF_SETUP_MODE="${2:-}"
+        shift 2
+        ;;
+      --ref-source-dir)
+        REF_SOURCE_DIR="${2:-}"
+        shift 2
+        ;;
+      --ref-fasta)
+        REF_FASTA_FILE="${2:-}"
+        shift 2
+        ;;
+      --read-length)
+        REF_READ_LENGTH="${2:-}"
+        shift 2
+        ;;
+      --ensembl-release)
+        ENSEMBL_RELEASE="${2:-}"
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -113,6 +146,13 @@ parse_args() {
     case "$MODE" in
       docker|conda|manual) ;;
       *) die "Invalid --mode '$MODE'. Use docker, conda, or manual." ;;
+    esac
+  fi
+
+  if [[ -n "$REF_SETUP_MODE" ]]; then
+    case "$REF_SETUP_MODE" in
+      existing|local|ensembl) ;;
+      *) die "Invalid --ref-mode '$REF_SETUP_MODE'. Use existing, local, or ensembl." ;;
     esac
   fi
 }
@@ -163,7 +203,7 @@ choose_mode() {
     die "Mode was not provided in non-interactive mode"
   fi
 
-  echo "Choose setup mode:"
+  echo "How do you want to install and run the pipeline?"
   echo "  1) Docker (recommended)"
   echo "  2) Conda"
   echo "  3) Manual install"
@@ -173,6 +213,259 @@ choose_mode() {
     2) MODE="conda" ;;
     3) MODE="manual" ;;
     *) die "Invalid choice: $choice" ;;
+  esac
+}
+
+prompt_default() {
+  local label="$1"
+  local default="$2"
+  local value
+  read -r -p "$label [$default]: " value
+  if [[ -z "$value" ]]; then
+    printf "%s" "$default"
+  else
+    printf "%s" "$value"
+  fi
+}
+
+first_match() {
+  local dir="$1"
+  shift
+  local pattern
+  for pattern in "$@"; do
+    local f
+    f="$(find "$dir" -maxdepth 1 -type f -iname "$pattern" | sort | head -n 1 || true)"
+    if [[ -n "$f" ]]; then
+      printf "%s" "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
+interactive_reference_prompt() {
+  if [[ -n "$REF_SETUP_MODE" ]]; then
+    return 0
+  fi
+
+  echo
+  echo "Reference genome setup:"
+  echo "  1) I already have STAR index + GTF"
+  echo "  2) I have local FASTA/FNA/FA + GTF (build STAR index now)"
+  echo "  3) Download human reference from Ensembl and build STAR index"
+  read -r -p "Enter choice [1-3]: " ref_choice
+  case "$ref_choice" in
+    1) REF_SETUP_MODE="existing" ;;
+    2) REF_SETUP_MODE="local" ;;
+    3) REF_SETUP_MODE="ensembl" ;;
+    *) die "Invalid reference choice: $ref_choice" ;;
+  esac
+}
+
+interactive_path_prompt() {
+  if [[ $NON_INTERACTIVE -eq 1 ]]; then
+    return 0
+  fi
+
+  echo
+  FASTQ_DIR="$(prompt_default "FASTQ directory (contains *_1P.fastq.gz, *_2P.fastq.gz)" "$FASTQ_DIR")"
+  OUTPUT_DIR="$(prompt_default "Output directory" "$OUTPUT_DIR")"
+
+  interactive_reference_prompt
+
+  case "$REF_SETUP_MODE" in
+    existing)
+      GENOME_DIR="$(prompt_default "STAR genome index directory" "$GENOME_DIR")"
+      GTF_FILE="$(prompt_default "GTF file path" "$GTF_FILE")"
+      ;;
+    local)
+      REF_SOURCE_DIR="$(prompt_default "Directory containing FASTA/FNA/FA + GTF" "${REF_SOURCE_DIR:-$ROOT_DIR/refs}")"
+      if [[ -d "$REF_SOURCE_DIR" ]]; then
+        local auto_gtf auto_fa
+        auto_gtf="$(first_match "$REF_SOURCE_DIR" "*.gtf" "*.gtf.gz" || true)"
+        auto_fa="$(first_match "$REF_SOURCE_DIR" "*.fa" "*.fasta" "*.fna" "*.fa.gz" "*.fasta.gz" "*.fna.gz" || true)"
+        if [[ -n "$auto_gtf" ]]; then
+          GTF_FILE="$auto_gtf"
+        fi
+        if [[ -n "$auto_fa" ]]; then
+          REF_FASTA_FILE="$auto_fa"
+        fi
+      fi
+      GTF_FILE="$(prompt_default "GTF file path" "${GTF_FILE:-$ROOT_DIR/refs/annotation.gtf}")"
+      REF_FASTA_FILE="$(prompt_default "FASTA/FNA/FA file path" "${REF_FASTA_FILE:-$ROOT_DIR/refs/genome.fa.gz}")"
+      GENOME_DIR="$(prompt_default "STAR index output directory" "$GENOME_DIR")"
+      REF_READ_LENGTH="$(prompt_default "Read length (for sjdbOverhang)" "$REF_READ_LENGTH")"
+      ;;
+    ensembl)
+      local refs_out
+      refs_out="$(prompt_default "Reference output base directory" "$ROOT_DIR/refs")"
+      GENOME_DIR="$refs_out/star_index"
+      GTF_FILE="$refs_out/annotation.gtf"
+      ENSEMBL_RELEASE="$(prompt_default "Ensembl release" "$ENSEMBL_RELEASE")"
+      REF_READ_LENGTH="$(prompt_default "Read length (for sjdbOverhang)" "$REF_READ_LENGTH")"
+      ;;
+    *)
+      die "Unexpected REF_SETUP_MODE: $REF_SETUP_MODE"
+      ;;
+  esac
+}
+
+build_star_index_local() {
+  local star_bin="$1"
+  [[ -f "$GTF_FILE" ]] || die "GTF file not found: $GTF_FILE"
+  [[ -f "$REF_FASTA_FILE" ]] || die "FASTA file not found: $REF_FASTA_FILE"
+  [[ "$REF_READ_LENGTH" =~ ^[0-9]+$ ]] || die "--read-length must be a positive integer"
+  local sjdb=$((REF_READ_LENGTH - 1))
+  [[ "$sjdb" -ge 1 ]] || die "Read length must be >= 2"
+
+  mkdir -p "$GENOME_DIR"
+  log "Building STAR index from local FASTA/GTF"
+  "$star_bin" \
+    --runThreadN "$(nproc 2>/dev/null || echo 8)" \
+    --runMode genomeGenerate \
+    --genomeDir "$GENOME_DIR" \
+    --genomeFastaFiles "$REF_FASTA_FILE" \
+    --sjdbGTFfile "$GTF_FILE" \
+    --sjdbOverhang "$sjdb"
+  success "STAR index ready: $GENOME_DIR"
+}
+
+prepare_references_host() {
+  case "${REF_SETUP_MODE:-existing}" in
+    existing)
+      return 0
+      ;;
+    local)
+      have STAR || die "STAR is required to build a local index. Install STAR or use --ref-mode existing."
+      build_star_index_local "STAR"
+      ;;
+    ensembl)
+      have STAR || die "STAR is required to download/index Ensembl references. Install STAR or use --ref-mode existing."
+      local out_base
+      out_base="$(dirname "$GTF_FILE")"
+      log "Downloading Ensembl reference (release ${ENSEMBL_RELEASE}) and building STAR index"
+      "$ROOT_DIR/scripts/download_and_index_reference.sh" \
+        --release "$ENSEMBL_RELEASE" \
+        --assembly "$ENSEMBL_ASSEMBLY" \
+        --species "$ENSEMBL_SPECIES" \
+        --read-length "$REF_READ_LENGTH" \
+        --out-dir "$out_base" \
+        --star-bin STAR
+      GENOME_DIR="$out_base/star_index"
+      GTF_FILE="$out_base/annotation.gtf"
+      success "Reference prepared in: $out_base"
+      ;;
+    *)
+      die "Unexpected REF_SETUP_MODE: $REF_SETUP_MODE"
+      ;;
+  esac
+}
+
+prepare_references_conda() {
+  local ccmd="$1"
+  case "${REF_SETUP_MODE:-existing}" in
+    existing)
+      return 0
+      ;;
+    local)
+      [[ -f "$GTF_FILE" ]] || die "GTF file not found: $GTF_FILE"
+      [[ -f "$REF_FASTA_FILE" ]] || die "FASTA file not found: $REF_FASTA_FILE"
+      [[ "$REF_READ_LENGTH" =~ ^[0-9]+$ ]] || die "--read-length must be a positive integer"
+      local sjdb=$((REF_READ_LENGTH - 1))
+      [[ "$sjdb" -ge 1 ]] || die "Read length must be >= 2"
+      mkdir -p "$GENOME_DIR"
+      log "Building STAR index in conda environment"
+      "$ccmd" run -n "$CONDA_ENV_NAME" STAR \
+        --runThreadN "$(nproc 2>/dev/null || echo 8)" \
+        --runMode genomeGenerate \
+        --genomeDir "$GENOME_DIR" \
+        --genomeFastaFiles "$REF_FASTA_FILE" \
+        --sjdbGTFfile "$GTF_FILE" \
+        --sjdbOverhang "$sjdb"
+      success "STAR index ready: $GENOME_DIR"
+      ;;
+    ensembl)
+      local out_base
+      out_base="$(dirname "$GTF_FILE")"
+      log "Downloading Ensembl reference inside conda environment"
+      "$ccmd" run -n "$CONDA_ENV_NAME" "$ROOT_DIR/scripts/download_and_index_reference.sh" \
+        --release "$ENSEMBL_RELEASE" \
+        --assembly "$ENSEMBL_ASSEMBLY" \
+        --species "$ENSEMBL_SPECIES" \
+        --read-length "$REF_READ_LENGTH" \
+        --out-dir "$out_base" \
+        --star-bin STAR
+      GENOME_DIR="$out_base/star_index"
+      GTF_FILE="$out_base/annotation.gtf"
+      success "Reference prepared in: $out_base"
+      ;;
+    *)
+      die "Unexpected REF_SETUP_MODE: $REF_SETUP_MODE"
+      ;;
+  esac
+}
+
+prepare_references_docker() {
+  case "${REF_SETUP_MODE:-existing}" in
+    existing)
+      return 0
+      ;;
+    local)
+      [[ -f "$GTF_FILE" ]] || die "GTF file not found: $GTF_FILE"
+      [[ -f "$REF_FASTA_FILE" ]] || die "FASTA file not found: $REF_FASTA_FILE"
+      [[ "$REF_READ_LENGTH" =~ ^[0-9]+$ ]] || die "--read-length must be a positive integer"
+      local sjdb=$((REF_READ_LENGTH - 1))
+      [[ "$sjdb" -ge 1 ]] || die "Read length must be >= 2"
+
+      local gtf_parent gtf_name fasta_parent fasta_name genome_parent genome_name threads
+      gtf_parent="$(dirname "$GTF_FILE")"
+      gtf_name="$(basename "$GTF_FILE")"
+      fasta_parent="$(dirname "$REF_FASTA_FILE")"
+      fasta_name="$(basename "$REF_FASTA_FILE")"
+      genome_parent="$(dirname "$GENOME_DIR")"
+      genome_name="$(basename "$GENOME_DIR")"
+      threads="$(nproc 2>/dev/null || echo 8)"
+      mkdir -p "$genome_parent"
+
+      log "Building STAR index in Docker container"
+      docker compose run --rm \
+        --entrypoint STAR \
+        -v "$gtf_parent:/gtfsrc:ro" \
+        -v "$fasta_parent:/fastasrc:ro" \
+        -v "$genome_parent:/outroot" \
+        star-rseqc \
+        --runThreadN "$threads" \
+        --runMode genomeGenerate \
+        --genomeDir "/outroot/$genome_name" \
+        --genomeFastaFiles "/fastasrc/$fasta_name" \
+        --sjdbGTFfile "/gtfsrc/$gtf_name" \
+        --sjdbOverhang "$sjdb"
+      success "STAR index ready: $GENOME_DIR"
+      ;;
+    ensembl)
+      local out_base
+      out_base="$(dirname "$GTF_FILE")"
+      mkdir -p "$out_base"
+      log "Downloading Ensembl reference and building STAR index in Docker container"
+      docker compose run --rm \
+        --entrypoint /bin/sh \
+        -v "$ROOT_DIR/scripts:/scripts:ro" \
+        -v "$out_base:/refsout" \
+        star-rseqc \
+        -lc "/scripts/download_and_index_reference.sh \
+          --release '$ENSEMBL_RELEASE' \
+          --assembly '$ENSEMBL_ASSEMBLY' \
+          --species '$ENSEMBL_SPECIES' \
+          --read-length '$REF_READ_LENGTH' \
+          --out-dir /refsout \
+          --star-bin STAR"
+      GENOME_DIR="$out_base/star_index"
+      GTF_FILE="$out_base/annotation.gtf"
+      success "Reference prepared in: $out_base"
+      ;;
+    *)
+      die "Unexpected REF_SETUP_MODE: $REF_SETUP_MODE"
+      ;;
   esac
 }
 
@@ -266,6 +559,12 @@ load_path_defaults() {
   OUTPUT_DIR="$(resolve_path "$OUTPUT_DIR")"
   GENOME_DIR="$(resolve_path "$GENOME_DIR")"
   GTF_FILE="$(resolve_path "$GTF_FILE")"
+  if [[ -n "$REF_SOURCE_DIR" ]]; then
+    REF_SOURCE_DIR="$(resolve_path "$REF_SOURCE_DIR")"
+  fi
+  if [[ -n "$REF_FASTA_FILE" ]]; then
+    REF_FASTA_FILE="$(resolve_path "$REF_FASTA_FILE")"
+  fi
 }
 
 setup_repo_dirs() {
@@ -304,13 +603,15 @@ run_docker_mode() {
   setup_repo_dirs
   ensure_env_file
   load_path_defaults
+  interactive_path_prompt
+  log "Building container image"
+  docker compose build
+
+  prepare_references_docker
   ensure_precheck_script
 
   log "Running host preflight checks"
   run_preflight
-
-  log "Building container image"
-  docker compose build
 
   local gtf_parent
   local gtf_name
@@ -362,10 +663,8 @@ run_conda_mode() {
   setup_repo_dirs
   ensure_env_file
   load_path_defaults
+  interactive_path_prompt
   ensure_precheck_script
-
-  log "Running host preflight checks"
-  run_preflight
 
   log "Preparing conda environment: $CONDA_ENV_NAME"
   if conda_env_exists "$ccmd"; then
@@ -373,6 +672,11 @@ run_conda_mode() {
   else
     "$ccmd" env create -n "$CONDA_ENV_NAME" -f "$ROOT_DIR/environment.yml"
   fi
+
+  prepare_references_conda "$ccmd"
+
+  log "Running host preflight checks"
+  run_preflight
 
   log "Building Rust binary in conda environment"
   "$ccmd" run -n "$CONDA_ENV_NAME" cargo build --release
@@ -407,6 +711,8 @@ run_manual_mode() {
   setup_repo_dirs
   ensure_env_file
   load_path_defaults
+  interactive_path_prompt
+  prepare_references_host
   ensure_precheck_script
 
   local missing=0

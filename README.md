@@ -16,6 +16,7 @@ checkpoint verification.
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Troubleshooting](#troubleshooting)
 - [Usage](#usage)
   - [Arguments](#arguments)
   - [Options](#options)
@@ -67,22 +68,22 @@ checkpoint verification.
 
 ## Requirements
 
-| Tool | Version | Default Path |
+| Tool | Version | Default Resolution |
 |------|---------|--------------|
-| [STAR](https://github.com/alexdobin/STAR) | v2.7.11b+ | `/home/cml/miniforge3/envs/star/bin/STAR` |
+| [STAR](https://github.com/alexdobin/STAR) | v2.7.11b+ | `--star-env <DIR>/bin/STAR` or `PATH` |
 | [samtools](http://www.htslib.org/) | v1.15+ | System PATH |
-| [RSeQC](http://rseqc.sourceforge.net/) | v5.0+ | `/home/cml/miniforge3/envs/RSeQC/bin/` |
-| [deeptools](https://deeptools.readthedocs.io/) | v3.5+ | `/home/cml/miniforge3/envs/deeptools/bin/bamCoverage` |
+| [RSeQC](http://rseqc.sourceforge.net/) | v5.0+ | `--rseqc-env <DIR>/bin/` or `PATH` |
+| [deeptools](https://deeptools.readthedocs.io/) | v3.5+ | `--deeptools-env <DIR>/bin/bamCoverage` or `PATH` |
 | [Rscript](https://www.r-project.org/) + ggplot2 | R 4.0+ | System PATH |
 | [zcat](https://www.gnu.org/software/gzip/) | any | System PATH |
 | Rust toolchain | 1.70+ (edition 2021) | — |
 
 ### Reference files
 
-| File | Default Path |
+| File | Default Resolution |
 |------|-------------|
-| STAR genome index | `/home/cml/humandb/transcriptomeindex/ensembl113/star_hg38_101bp_index` |
-| GTF annotation | `/home/cml/humandb/transcriptomeindex/ensembl113/Homo_sapiens.GRCh38.113.gtf` |
+| STAR genome index | `--genome-dir <DIR>` or `STAR_RSEQC_GENOME_DIR` |
+| GTF annotation | `--gtf <FILE>` or `STAR_RSEQC_GTF` |
 
 All default paths can be overridden via command-line flags or environment variables
 (`STAR_RSEQC_GENOME_DIR`, `STAR_RSEQC_GTF`, `STAR_RSEQC_STAR_ENV`,
@@ -93,7 +94,8 @@ All default paths can be overridden via command-line flags or environment variab
 ## Installation
 
 ```bash
-cd /home/cml/rust-codes/star-rseqc
+git clone <your-fork-or-repo-url> star-rseqc
+cd star-rseqc
 cargo build --release
 
 # The binary is at:
@@ -101,6 +103,57 @@ cargo build --release
 
 # Optionally copy to a directory in your PATH:
 cp target/release/star-rseqc ~/.local/bin/
+```
+
+## Beginner Setup (Interactive)
+
+If you are starting from scratch, use the interactive setup script:
+
+```bash
+./setup.sh
+```
+
+It will prompt you for:
+
+1. Install/run mode:
+   - `1) Docker`
+   - `2) Conda`
+   - `3) Manual`
+2. Input/output paths:
+   - FASTQ directory
+   - output directory
+3. Reference setup mode:
+   - `1) Existing STAR index + GTF`
+   - `2) Local FASTA/FNA/FA + GTF (build index now)`
+   - `3) Download from Ensembl (human GRCh38 by default) and build index`
+
+Non-interactive examples:
+
+```bash
+# Existing references
+./setup.sh --mode conda --non-interactive \
+  --fastq-dir ./data \
+  --output-dir ./results \
+  --genome-dir ./refs/star_index \
+  --gtf ./refs/annotation.gtf
+
+# Build STAR index from local FASTA + GTF
+./setup.sh --mode manual --non-interactive \
+  --ref-mode local \
+  --ref-source-dir ./refs \
+  --ref-fasta ./refs/genome.fa.gz \
+  --gtf ./refs/annotation.gtf \
+  --genome-dir ./refs/star_index \
+  --fastq-dir ./data \
+  --output-dir ./results
+
+# Download from Ensembl and build index
+./setup.sh --mode conda --non-interactive \
+  --ref-mode ensembl \
+  --ensembl-release 113 \
+  --read-length 101 \
+  --fastq-dir ./data \
+  --output-dir ./results
 ```
 
 ### Dependencies (Cargo.toml)
@@ -117,6 +170,9 @@ cp target/release/star-rseqc ~/.local/bin/
 
 ## Quick Start
 
+For first-time setup, use `./setup.sh`. The commands below assume `--genome-dir`
+and `--gtf` are already configured (via flags or `STAR_RSEQC_*` env vars).
+
 ```bash
 # Run on a directory containing paired-end FASTQs
 star-rseqc /path/to/Paired/
@@ -130,6 +186,83 @@ star-rseqc ./ --dry-run
 # Resume after interruption (just re-run the same command)
 star-rseqc ./
 ```
+
+---
+
+## Troubleshooting
+
+### Fast sanity checks
+
+```bash
+# Recommended for beginners: let setup script guide and preflight-check everything
+./setup.sh
+
+# Validate input/reference layout without running full pipeline
+./scripts/preflight.sh \
+  --fastq-dir ./data \
+  --output-dir ./results \
+  --genome-dir ./refs/star_index \
+  --gtf ./refs/annotation.gtf
+```
+
+### Common errors and fixes
+
+1. `STAR genome dir is not configured` or `GTF is required for STAR alignment`
+   Fix:
+   - Run `./setup.sh` and select reference setup interactively, or
+   - pass explicit flags:
+   ```bash
+   star-rseqc ./data --genome-dir ./refs/star_index --gtf ./refs/annotation.gtf
+   ```
+
+2. `STAR binary not found`, `bamCoverage not found`, or `RSeQC script not found`
+   Fix:
+   - easiest: run `./setup.sh` with `Docker` or `Conda` mode.
+   - if manual install, ensure tools are in `PATH` or set:
+   ```bash
+   export STAR_RSEQC_STAR_ENV=/path/to/env
+   export STAR_RSEQC_RSEQC_ENV=/path/to/env
+   export STAR_RSEQC_DEEPTOOLS_ENV=/path/to/env
+   ```
+
+3. `Rscript not found` or ggplot2-related error
+   Fix:
+   ```bash
+   # Ubuntu/Debian example
+   sudo apt-get update && sudo apt-get install -y r-base
+   Rscript -e 'install.packages("ggplot2", repos="https://cloud.r-project.org")'
+   ```
+
+4. `No *_1P.fastq.gz files found` or missing pair errors
+   Fix:
+   - Ensure paired-end naming exactly matches:
+     - `<SAMPLE>_1P.fastq.gz`
+     - `<SAMPLE>_2P.fastq.gz`
+   - run `./scripts/preflight.sh ...` before running the pipeline.
+
+5. `BAM index (...) is missing or empty` when using `--skip-alignment`
+   Fix:
+   - Generate BAM index first:
+   ```bash
+   samtools index -@ 4 sample_Aligned.sortedByCoord.out.bam
+   ```
+   - or rerun without `--skip-alignment`.
+
+6. Docker permission issues (`permission denied` on Docker socket)
+   Fix:
+   - Start Docker Desktop/Engine.
+   - Linux: add your user to docker group and re-login:
+   ```bash
+   sudo usermod -aG docker "$USER"
+   ```
+
+7. Conda activation/env issues
+   Fix:
+   - Use non-activation flow directly:
+   ```bash
+   conda run -n star-rseqc star-rseqc --help
+   ```
+   - or rerun `./setup.sh --mode conda` to recreate/update env from `environment.yml`.
 
 ---
 
@@ -261,9 +394,7 @@ PDF generation is mandatory and included in the genebody SHA256 checkpoint.
 │   ├── <sample>.geneBodyCoverage.txt
 │   ├── <sample>.geneBodyCoverage_plot.r
 │   ├── <sample>.geneBodyCoverage.pdf
-│   ├── <sample>.geneBodyCoverage.curves.r
 │   ├── <sample>.geneBodyCoverage.curves.pdf
-│   ├── <sample>.geneBodyCoverage.heatmap.r
 │   └── <sample>.geneBodyCoverage.heatMap.pdf
 ├── logs/                                    Per-sample tool logs
 │   ├── <sample>.star.log
@@ -457,8 +588,8 @@ Features:
 
 ## Reference Configuration
 
-Default paths are compiled into the binary but can be overridden via command-line
-flags or environment variables:
+Paths are configurable via command-line flags or environment variables. Tool
+binaries can be resolved from `PATH` when `--*-env` is not provided:
 
 ```bash
 # Override genome index and GTF
@@ -475,7 +606,7 @@ star-rseqc /data/Paired/ \
     --rseqc-env /opt/envs/rseqc \
     --deeptools-env /opt/envs/deeptools
 
-# Environment variables (override compiled defaults, overridden by flags)
+# Environment variables (used as defaults, overridden by flags)
 export STAR_RSEQC_GENOME_DIR=/alt/star_index
 export STAR_RSEQC_GTF=/alt/annotation.gtf
 export STAR_RSEQC_STAR_ENV=/opt/envs/star

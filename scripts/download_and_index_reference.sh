@@ -93,8 +93,24 @@ download_file() {
     curl -fL --retry 3 --retry-delay 2 -o "$dest" "$url"
   elif have wget; then
     wget -O "$dest" "$url"
+  elif have python || have python3; then
+    local pybin="python"
+    have python3 && pybin="python3"
+    "$pybin" - "$url" "$dest" <<'PY'
+import sys
+import urllib.request
+
+url = sys.argv[1]
+dest = sys.argv[2]
+with urllib.request.urlopen(url) as r, open(dest, "wb") as f:
+    while True:
+        chunk = r.read(1024 * 1024)
+        if not chunk:
+            break
+        f.write(chunk)
+PY
   else
-    die "Neither curl nor wget is installed. Install one and retry."
+    die "No downloader found (curl/wget/python). Install one and retry."
   fi
 }
 

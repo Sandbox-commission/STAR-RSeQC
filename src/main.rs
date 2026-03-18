@@ -47,15 +47,6 @@ static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
-const GENOME_DIR: &str =
-    "/home/cml/humandb/transcriptomeindex/ensembl113/star_hg38_101bp_index";
-const GTF_FILE: &str =
-    "/home/cml/humandb/transcriptomeindex/ensembl113/Homo_sapiens.GRCh38.113.gtf";
-const BED12_FILE: &str =
-    "/home/cml/humandb/transcriptomeindex/ensembl113/star_hg38_101bp_index/annotation.bed12";
-const STAR_ENV: &str = "/home/cml/miniforge3/envs/star";
-const RSEQC_ENV: &str = "/home/cml/miniforge3/envs/RSeQC";
-const DEEPTOOLS_ENV: &str = "/home/cml/miniforge3/envs/deeptools";
 const SAMTOOLS_BIN: &str = "samtools"; // resolved from $PATH by default
 
 const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
@@ -120,18 +111,18 @@ fn usage() {
     eprintln!();
     eprintln!("REFERENCE FILES:");
     eprintln!("    --genome-dir <DIR>        STAR genome index");
-    eprintln!("                              [default: $STAR_RSEQC_GENOME_DIR or {}]", GENOME_DIR);
+    eprintln!("                              [default: $STAR_RSEQC_GENOME_DIR]");
     eprintln!("    --gtf <FILE>              GTF annotation file");
-    eprintln!("                              [default: $STAR_RSEQC_GTF or {}]", GTF_FILE);
+    eprintln!("                              [default: $STAR_RSEQC_GTF]");
     eprintln!("    --bed <FILE>              Pre-computed BED12 file (else auto-generated)");
     eprintln!();
     eprintln!("ENVIRONMENT & TOOLS:");
     eprintln!("    --star-env <DIR>          STAR environment path");
-    eprintln!("                              [default: $STAR_RSEQC_STAR_ENV or {}]", STAR_ENV);
+    eprintln!("                              [default: $STAR_RSEQC_STAR_ENV, else STAR from PATH]");
     eprintln!("    --rseqc-env <DIR>         RSeQC environment path");
-    eprintln!("                              [default: $STAR_RSEQC_RSEQC_ENV or {}]", RSEQC_ENV);
+    eprintln!("                              [default: $STAR_RSEQC_RSEQC_ENV, else scripts from PATH]");
     eprintln!("    --deeptools-env <DIR>     deeptools environment path (for bamCoverage)");
-    eprintln!("                              [default: $STAR_RSEQC_DEEPTOOLS_ENV or {}]", DEEPTOOLS_ENV);
+    eprintln!("                              [default: $STAR_RSEQC_DEEPTOOLS_ENV, else bamCoverage from PATH]");
     eprintln!();
     eprintln!("ENVIRONMENT VARIABLE OVERRIDES:");
     eprintln!("    STAR_RSEQC_GENOME_DIR     Default for --genome-dir");
@@ -161,14 +152,14 @@ fn usage() {
     eprintln!("        50T_CRC_1P.fastq.gz   ->  sample = 50T_CRC");
     eprintln!();
     eprintln!("REFERENCE FILES:");
-    eprintln!("    STAR index : {}", GENOME_DIR);
-    eprintln!("    GTF        : {}", GTF_FILE);
+    eprintln!("    STAR index : --genome-dir or $STAR_RSEQC_GENOME_DIR");
+    eprintln!("    GTF        : --gtf or $STAR_RSEQC_GTF");
     eprintln!();
     eprintln!("TOOL ENVIRONMENTS:");
-    eprintln!("    STAR       : {}/bin/STAR", STAR_ENV);
+    eprintln!("    STAR       : --star-env <DIR>/bin/STAR OR STAR in PATH");
     eprintln!("    samtools   : {}", SAMTOOLS_BIN);
-    eprintln!("    RSeQC      : {}/bin/infer_experiment.py", RSEQC_ENV);
-    eprintln!("    deeptools  : {}/bin/bamCoverage", DEEPTOOLS_ENV);
+    eprintln!("    RSeQC      : --rseqc-env <DIR>/bin/*.py OR scripts in PATH");
+    eprintln!("    deeptools  : --deeptools-env <DIR>/bin/bamCoverage OR bamCoverage in PATH");
     eprintln!("    Rscript    : system PATH (optional, for ggplot2 PDF plots)");
     eprintln!();
     eprintln!("OUTPUT STRUCTURE:");
@@ -278,9 +269,9 @@ struct Config {
     genome_dir: PathBuf,
     gtf: PathBuf,
     bed: Option<PathBuf>,
-    star_env: PathBuf,
-    rseqc_env: PathBuf,
-    deeptools_env: PathBuf,
+    star_env: Option<PathBuf>,
+    rseqc_env: Option<PathBuf>,
+    deeptools_env: Option<PathBuf>,
     samtools: PathBuf,
     threads_per_sample: usize,
     parallel_jobs: usize,
@@ -309,19 +300,28 @@ fn parse_args() -> Result<Config, bool> {
 
     let mut fastq_dir: Option<PathBuf> = None;
     let mut output_dir = PathBuf::from("star-rseqc-results");
-    // Environment variables override compiled-in defaults, allowing deployment on
-    // different machines without recompiling. Explicit flags override env vars.
-    let mut genome_dir = PathBuf::from(
-        env::var("STAR_RSEQC_GENOME_DIR").unwrap_or_else(|_| GENOME_DIR.to_string()));
-    let mut gtf = PathBuf::from(
-        env::var("STAR_RSEQC_GTF").unwrap_or_else(|_| GTF_FILE.to_string()));
+    // Environment variables provide optional defaults. Explicit flags override env vars.
+    let mut genome_dir = env::var("STAR_RSEQC_GENOME_DIR")
+        .ok()
+        .map(|v| PathBuf::from(v.trim().to_string()))
+        .unwrap_or_default();
+    let mut gtf = env::var("STAR_RSEQC_GTF")
+        .ok()
+        .map(|v| PathBuf::from(v.trim().to_string()))
+        .unwrap_or_default();
     let mut bed: Option<PathBuf> = None;
-    let mut star_env = PathBuf::from(
-        env::var("STAR_RSEQC_STAR_ENV").unwrap_or_else(|_| STAR_ENV.to_string()));
-    let mut rseqc_env = PathBuf::from(
-        env::var("STAR_RSEQC_RSEQC_ENV").unwrap_or_else(|_| RSEQC_ENV.to_string()));
-    let mut deeptools_env = PathBuf::from(
-        env::var("STAR_RSEQC_DEEPTOOLS_ENV").unwrap_or_else(|_| DEEPTOOLS_ENV.to_string()));
+    let mut star_env = env::var("STAR_RSEQC_STAR_ENV").ok().and_then(|v| {
+        let t = v.trim();
+        if t.is_empty() { None } else { Some(PathBuf::from(t)) }
+    });
+    let mut rseqc_env = env::var("STAR_RSEQC_RSEQC_ENV").ok().and_then(|v| {
+        let t = v.trim();
+        if t.is_empty() { None } else { Some(PathBuf::from(t)) }
+    });
+    let mut deeptools_env = env::var("STAR_RSEQC_DEEPTOOLS_ENV").ok().and_then(|v| {
+        let t = v.trim();
+        if t.is_empty() { None } else { Some(PathBuf::from(t)) }
+    });
     let mut samtools = PathBuf::from(SAMTOOLS_BIN);
     let mut threads_per_sample: Option<usize> = None;
     let mut parallel_jobs: Option<usize> = None;
@@ -411,13 +411,13 @@ fn parse_args() -> Result<Config, bool> {
                 bed = Some(PathBuf::from(next_val!("--bed")));
             }
             "--star-env" => {
-                star_env = PathBuf::from(next_val!("--star-env"));
+                star_env = Some(PathBuf::from(next_val!("--star-env")));
             }
             "--rseqc-env" => {
-                rseqc_env = PathBuf::from(next_val!("--rseqc-env"));
+                rseqc_env = Some(PathBuf::from(next_val!("--rseqc-env")));
             }
             "--deeptools-env" => {
-                deeptools_env = PathBuf::from(next_val!("--deeptools-env"));
+                deeptools_env = Some(PathBuf::from(next_val!("--deeptools-env")));
             }
             "--samtools" => {
                 samtools = PathBuf::from(next_val!("--samtools"));
@@ -1757,7 +1757,7 @@ fn run_star_sample(
                 state.add_event(format!("  WARN  {} — removing existing BAM ({}B) before re-alignment", sample.name, bam_size));
                 cleanup_partial_star(&star_dir, &sample.name);
             }
-            let star_bin = config.star_env.join("bin/STAR");
+            let star_bin = star_bin_path(config);
             let (stdout_cfg, stderr_cfg) =
                 make_log_stdio(&log_dir, &format!("{}.star", sample.name))?;
 
@@ -2014,7 +2014,7 @@ fn run_deeptools_phase(
 
     state.set_active(slot, &sample.name, "bamCoverage (BAM -> bigwig)");
     let log_dir = config.output_dir.join("logs");
-    let bam_coverage = config.deeptools_env.join("bin/bamCoverage");
+    let bam_coverage = bam_coverage_path(config);
     let bam_str = bam_path.to_str()
         .ok_or_else(|| format!("{}: BAM path is not valid UTF-8", sample.name))?;
     let bw_str = bw_path.to_str()
@@ -2090,7 +2090,7 @@ fn run_rseqc_phase3(
     }
 
     {
-        let rseqc_python = config.rseqc_env.join("bin/python");
+        let rseqc_python = rseqc_python_path(config);
         let active_label = [
             if skip_infer { None } else { Some("infer") },
             if skip_rdist { None } else { Some("read_dist") },
@@ -2131,7 +2131,7 @@ fn run_rseqc_phase3(
                         state.add_event(format!("  SKIP  {} — infer_experiment (checkpoint valid)", sample.name));
                         return;
                     }
-                    let script = config.rseqc_env.join("bin/infer_experiment.py");
+                    let script = rseqc_script_path(config, "infer_experiment.py");
                         let script_str = match script.to_str() {
                             Some(s) => s.to_string(),
                             None => {
@@ -2174,7 +2174,7 @@ fn run_rseqc_phase3(
                         state.add_event(format!("  SKIP  {} — read_distribution (checkpoint valid)", sample.name));
                         return;
                     }
-                    let script = config.rseqc_env.join("bin/read_distribution.py");
+                    let script = rseqc_script_path(config, "read_distribution.py");
                         let script_str = match script.to_str() {
                             Some(s) => s.to_string(),
                             None => {
@@ -2216,7 +2216,7 @@ fn run_rseqc_phase3(
                         state.add_event(format!("  SKIP  {} — geneBody_coverage2 (checkpoint valid)", sample.name));
                         return;
                     }
-                    let script = config.rseqc_env.join("bin/geneBody_coverage2.py");
+                    let script = rseqc_script_path(config, "geneBody_coverage2.py");
                         let script_str = match script.to_str() {
                             Some(s) => s.to_string(),
                             None => {
@@ -2841,6 +2841,29 @@ fn resolve_binary(bin: &Path) -> Option<PathBuf> {
     }
 }
 
+fn tool_from_env_or_path(env_prefix: Option<&Path>, binary: &str) -> PathBuf {
+    match env_prefix {
+        Some(prefix) => prefix.join("bin").join(binary),
+        None => PathBuf::from(binary),
+    }
+}
+
+fn star_bin_path(config: &Config) -> PathBuf {
+    tool_from_env_or_path(config.star_env.as_deref(), "STAR")
+}
+
+fn rseqc_python_path(config: &Config) -> PathBuf {
+    tool_from_env_or_path(config.rseqc_env.as_deref(), "python")
+}
+
+fn rseqc_script_path(config: &Config, script: &str) -> PathBuf {
+    tool_from_env_or_path(config.rseqc_env.as_deref(), script)
+}
+
+fn bam_coverage_path(config: &Config) -> PathBuf {
+    tool_from_env_or_path(config.deeptools_env.as_deref(), "bamCoverage")
+}
+
 /// Parse a version string like "1.12", "1.9", "1.21" into (major, minor).
 fn parse_samtools_version(output: &str) -> Option<(u32, u32)> {
     // samtools --version first line: "samtools 1.12\n..." or "samtools 1.9\n..."
@@ -2885,19 +2908,34 @@ fn validate_environment(config: &mut Config) -> Result<(), String> {
     }
 
     if !config.skip_alignment {
-        let star_bin = config.star_env.join("bin/STAR");
-        if !star_bin.exists() {
+        let star_bin = star_bin_path(config);
+        if resolve_binary(&star_bin).is_none() {
             return Err(format!(
-                "STAR binary not found: {}\nIs the --star-env path correct?",
-                star_bin.display()
+                "STAR binary not found: {}\nSet --star-env <DIR> (containing bin/STAR) or ensure STAR is in PATH.",
+                star_bin.to_string_lossy()
             ));
         }
 
+        if config.genome_dir.as_os_str().is_empty() {
+            return Err(
+                "STAR genome dir is not configured.\nSet --genome-dir <DIR> or STAR_RSEQC_GENOME_DIR."
+                    .to_string(),
+            );
+        }
         if !config.genome_dir.exists() {
             return Err(format!(
                 "STAR genome dir not found: {}",
                 config.genome_dir.display()
             ));
+        }
+        if config.gtf.as_os_str().is_empty() {
+            return Err(
+                "GTF is required for STAR alignment.\nSet --gtf <FILE> or STAR_RSEQC_GTF."
+                    .to_string(),
+            );
+        }
+        if !config.gtf.exists() {
+            return Err(format!("GTF not found: {}", config.gtf.display()));
         }
         let genome_file = config.genome_dir.join("Genome");
         if !genome_file.exists() {
@@ -2909,11 +2947,11 @@ fn validate_environment(config: &mut Config) -> Result<(), String> {
     }
 
     {
-        let rseqc_python = config.rseqc_env.join("bin/python");
-        if !rseqc_python.exists() {
+        let rseqc_python = rseqc_python_path(config);
+        if resolve_binary(&rseqc_python).is_none() {
             return Err(format!(
-                "RSeQC python not found: {}\nIs the --rseqc-env path correct?",
-                rseqc_python.display()
+                "RSeQC python not found: {}\nSet --rseqc-env <DIR> (containing bin/python) or ensure python is in PATH.",
+                rseqc_python.to_string_lossy()
             ));
         }
 
@@ -2922,20 +2960,20 @@ fn validate_environment(config: &mut Config) -> Result<(), String> {
             "geneBody_coverage2.py",
             "read_distribution.py",
         ] {
-            let path = config.rseqc_env.join("bin").join(script);
-            if !path.exists() {
+            let path = rseqc_script_path(config, script);
+            if resolve_binary(&path).is_none() {
                 return Err(format!(
-                    "RSeQC script not found: {}\nIs the --rseqc-env path correct?",
-                    path.display()
+                    "RSeQC script not found: {}\nSet --rseqc-env <DIR> or ensure {script} is in PATH.",
+                    path.to_string_lossy()
                 ));
             }
         }
 
-        let bam_coverage = config.deeptools_env.join("bin/bamCoverage");
-        if !bam_coverage.exists() {
+        let bam_coverage = bam_coverage_path(config);
+        if resolve_binary(&bam_coverage).is_none() {
             return Err(format!(
-                "bamCoverage not found: {}\nIs the --deeptools-env path correct?",
-                bam_coverage.display()
+                "bamCoverage not found: {}\nSet --deeptools-env <DIR> or ensure bamCoverage is in PATH.",
+                bam_coverage.to_string_lossy()
             ));
         }
 
@@ -2951,6 +2989,12 @@ fn validate_environment(config: &mut Config) -> Result<(), String> {
 
     // GTF is needed only when BED must be auto-generated
     if config.bed.is_none() {
+        if config.gtf.as_os_str().is_empty() {
+            return Err(
+                "GTF is not configured.\nSet --gtf <FILE>, STAR_RSEQC_GTF, or pass --bed <FILE>."
+                    .to_string(),
+            );
+        }
         if !config.gtf.exists() {
             return Err(format!("GTF not found: {}", config.gtf.display()));
         }
@@ -3029,11 +3073,11 @@ fn write_run_info(
     ref_hashes: RefHashes,
 ) {
     // Software versions
-    let star_ver    = get_tool_version(&config.star_env.join("bin/STAR"), "--version");
+    let star_ver    = get_tool_version(&star_bin_path(config), "--version");
     let samtools_ver = get_tool_version(&config.samtools, "--version");
-    let bamcov_ver  = get_tool_version(&config.deeptools_env.join("bin/bamCoverage"), "--version");
-    let python_ver  = get_tool_version(&config.rseqc_env.join("bin/python"), "--version");
-    let rseqc_ver   = get_tool_version(&config.rseqc_env.join("bin/infer_experiment.py"), "-v");
+    let bamcov_ver  = get_tool_version(&bam_coverage_path(config), "--version");
+    let python_ver  = get_tool_version(&rseqc_python_path(config), "--version");
+    let rseqc_ver   = get_tool_version(&rseqc_script_path(config, "infer_experiment.py"), "-v");
 
     let RefHashes { genome_params_sha256, gtf_sha256, bed_sha256 } = ref_hashes;
 
@@ -3091,10 +3135,18 @@ fn write_run_info(
             rseqc_package: rseqc_ver,
         },
         references: References {
-            genome_dir: config.genome_dir.display().to_string(),
+            genome_dir: if config.genome_dir.as_os_str().is_empty() {
+                "(not set)".to_string()
+            } else {
+                config.genome_dir.display().to_string()
+            },
             genome_params_sha256,
             gtf: RefFile {
-                path: config.gtf.display().to_string(),
+                path: if config.gtf.as_os_str().is_empty() {
+                    "(not set)".to_string()
+                } else {
+                    config.gtf.display().to_string()
+                },
                 sha256: gtf_sha256,
             },
             bed12: RefFile {
@@ -3205,28 +3257,36 @@ fn main() -> ExitCode {
         }
         bed.clone()
     } else {
-        // 1. Check default BED12 in genome dir
-        let default_bed = PathBuf::from(BED12_FILE);
-        // 2. Check next to GTF
-        let gtf_bed = config.gtf.with_extension("bed12");
-        // 3. Check in genome dir as annotation.bed12
-        let genome_bed = config.genome_dir.join("annotation.bed12");
-        // 4. Fallback to output dir
+        // 1. Check next to GTF (if configured)
+        let gtf_bed = if config.gtf.as_os_str().is_empty() {
+            None
+        } else {
+            Some(config.gtf.with_extension("bed12"))
+        };
+        // 2. Check in genome dir as annotation.bed12 (if configured)
+        let genome_bed = if config.genome_dir.as_os_str().is_empty() {
+            None
+        } else {
+            Some(config.genome_dir.join("annotation.bed12"))
+        };
+        // 3. Fallback to output dir
         let output_bed = config.output_dir.join("annotation.bed12");
 
-        if default_bed.exists() {
-            eprintln!("Using BED12: {}", default_bed.display());
-            default_bed
-        } else if gtf_bed.exists() {
+        if let Some(gtf_bed) = gtf_bed.as_ref().filter(|p| p.exists()) {
             eprintln!("Using BED12: {}", gtf_bed.display());
-            gtf_bed
-        } else if genome_bed.exists() {
+            gtf_bed.clone()
+        } else if let Some(genome_bed) = genome_bed.as_ref().filter(|p| p.exists()) {
             eprintln!("Using BED12: {}", genome_bed.display());
-            genome_bed
+            genome_bed.clone()
         } else if output_bed.exists() {
             eprintln!("Reusing cached BED12: {}", output_bed.display());
             output_bed
         } else {
+            if config.gtf.as_os_str().is_empty() {
+                eprintln!("GTF is required to generate BED12 when --bed is not provided.");
+                eprintln!("Set --gtf <FILE> or STAR_RSEQC_GTF, or pass --bed <FILE>.");
+                return ExitCode::FAILURE;
+            }
             // Auto-generate as last resort
             let gtf_bytes = fs::metadata(&config.gtf).map(|m| m.len()).unwrap_or(0);
             eprintln!("Converting GTF → BED12 ({:.1} GB)...", gtf_bytes as f64 / 1e9);
@@ -3235,13 +3295,14 @@ fn main() -> ExitCode {
                     Use --bed to supply a pre-converted BED12 and skip this step.");
             }
             // Try writing next to GTF, fallback to output dir
-            let target = if gtf_bed.parent().map(|p| {
-                let test = p.join(".bed12_write_test");
-                let ok = fs::write(&test, b"").is_ok();
-                let _ = fs::remove_file(&test);
-                ok
-            }).unwrap_or(false) {
-                gtf_bed
+            let target = if let Some(candidate) = gtf_bed {
+                let writable_parent = candidate.parent().map(|p| {
+                    let test = p.join(".bed12_write_test");
+                    let ok = fs::write(&test, b"").is_ok();
+                    let _ = fs::remove_file(&test);
+                    ok
+                }).unwrap_or(false);
+                if writable_parent { candidate } else { output_bed }
             } else {
                 output_bed
             };
@@ -3257,7 +3318,11 @@ fn main() -> ExitCode {
     };
 
     // ── Reference integrity check — warn if genome params are unreadable ──
-    let genome_params = config.genome_dir.join("genomeParameters.txt");
+    let genome_params = if config.genome_dir.as_os_str().is_empty() {
+        PathBuf::from("__UNSET_GENOME_DIR__/genomeParameters.txt")
+    } else {
+        config.genome_dir.join("genomeParameters.txt")
+    };
     if !genome_params.exists() {
         eprintln!("WARNING: genomeParameters.txt not found in genome_dir — reference provenance cannot be verified");
     }
@@ -3437,7 +3502,11 @@ fn main() -> ExitCode {
         let _genome_params_ref = &genome_params; // silence unused warning
     }
     let ref_genome_params = genome_params.clone();
-    let ref_gtf = config.gtf.clone();
+    let ref_gtf = if config.gtf.as_os_str().is_empty() {
+        PathBuf::from("__UNSET_GTF__")
+    } else {
+        config.gtf.clone()
+    };
     let ref_bed = bed_path.clone();
     let mut ref_hashes_thread: Option<std::thread::JoinHandle<RefHashes>> =
         Some(std::thread::spawn(move || {
