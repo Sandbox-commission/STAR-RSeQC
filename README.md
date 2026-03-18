@@ -103,6 +103,23 @@ cargo build --release
 
 # Optionally copy to a directory in your PATH:
 cp target/release/star-rseqc ~/.local/bin/
+
+# Verify it's available globally:
+star-rseqc --help
+```
+
+If `star-rseqc: command not found`, ensure `~/.local/bin` is in your `PATH`:
+
+```bash
+echo "$PATH"
+```
+
+If missing, add it:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+star-rseqc --help
 ```
 
 ## Beginner Setup (Interactive)
