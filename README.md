@@ -1,6 +1,6 @@
 # star-rseqc
 
-**STAR 2-pass alignment + deeptools + RSeQC quality control pipeline for paired-end RNA-seq**
+## STAR 2-pass alignment + deeptools + RSeQC quality control pipeline for paired-end RNA-seq
 
 A high-performance, resume-aware pipeline written in Rust that automates STAR
 two-pass alignment, BAM-to-bigwig conversion, and RSeQC quality control with
@@ -69,7 +69,7 @@ checkpoint verification.
 ## Requirements
 
 | Tool | Version | Default Resolution |
-|------|---------|--------------|
+| ---- | ------- | ------------------ |
 | [STAR](https://github.com/alexdobin/STAR) | v2.7.11b+ | `--star-env <DIR>/bin/STAR` or `PATH` |
 | [samtools](http://www.htslib.org/) | v1.15+ | System PATH |
 | [RSeQC](http://rseqc.sourceforge.net/) | v5.0+ | `--rseqc-env <DIR>/bin/` or `PATH` |
@@ -81,7 +81,7 @@ checkpoint verification.
 ### Reference files
 
 | File | Default Resolution |
-|------|-------------|
+| ---- | ------------------ |
 | STAR genome index | `--genome-dir <DIR>` or `STAR_RSEQC_GENOME_DIR` |
 | GTF annotation | `--gtf <FILE>` or `STAR_RSEQC_GTF` |
 
@@ -159,7 +159,7 @@ Non-interactive examples:
 ### Dependencies (Cargo.toml)
 
 | Crate | Purpose |
-|-------|---------|
+| ----- | ------- |
 | `chrono` | Timestamps in logs and summary |
 | `crossterm` | Full-screen TUI rendering (alternate screen, raw mode, colors) |
 | `glob` | FASTQ file pattern matching |
@@ -211,6 +211,7 @@ star-rseqc ./
    Fix:
    - Run `./setup.sh` and select reference setup interactively, or
    - pass explicit flags:
+
    ```bash
    star-rseqc ./data --genome-dir ./refs/star_index --gtf ./refs/annotation.gtf
    ```
@@ -219,6 +220,7 @@ star-rseqc ./
    Fix:
    - easiest: run `./setup.sh` with `Docker` or `Conda` mode.
    - if manual install, ensure tools are in `PATH` or set:
+
    ```bash
    export STAR_RSEQC_STAR_ENV=/path/to/env
    export STAR_RSEQC_RSEQC_ENV=/path/to/env
@@ -227,6 +229,7 @@ star-rseqc ./
 
 3. `Rscript not found` or ggplot2-related error
    Fix:
+
    ```bash
    # Ubuntu/Debian example
    sudo apt-get update && sudo apt-get install -y r-base
@@ -243,15 +246,18 @@ star-rseqc ./
 5. `BAM index (...) is missing or empty` when using `--skip-alignment`
    Fix:
    - Generate BAM index first:
+
    ```bash
    samtools index -@ 4 sample_Aligned.sortedByCoord.out.bam
    ```
+
    - or rerun without `--skip-alignment`.
 
 6. Docker permission issues (`permission denied` on Docker socket)
    Fix:
    - Start Docker Desktop/Engine.
    - Linux: add your user to docker group and re-login:
+
    ```bash
    sudo usermod -aG docker "$USER"
    ```
@@ -259,29 +265,31 @@ star-rseqc ./
 7. Conda activation/env issues
    Fix:
    - Use non-activation flow directly:
+
    ```bash
    conda run -n star-rseqc star-rseqc --help
    ```
+
    - or rerun `./setup.sh --mode conda` to recreate/update env from `environment.yml`.
 
 ---
 
 ## Usage
 
-```
+```bash
 star-rseqc <FASTQ_DIR> [OPTIONS]
 ```
 
 ### Arguments
 
 | Argument | Description |
-|----------|-------------|
+| -------- | ----------- |
 | `<FASTQ_DIR>` | Directory containing `*_1P.fastq.gz` paired-end FASTQ files |
 
 ### Options
 
 | Flag | Description | Default |
-|------|-------------|---------|
+| ---- | ----------- | ------- |
 | `-o, --output <DIR>` | Output directory | `star-rseqc-results` |
 | `-j, --jobs <N>` | Default parallel jobs | auto-detected from RAM |
 | `--star-jobs <N>` | STAR phase parallel jobs | same as `--jobs` |
@@ -308,14 +316,14 @@ star-rseqc <FASTQ_DIR> [OPTIONS]
 
 Files must follow this pattern:
 
-```
+```bash
 <SAMPLE>_1P.fastq.gz    (read 1 / forward)
 <SAMPLE>_2P.fastq.gz    (read 2 / reverse)
 ```
 
 The sample name is everything before `_1P` or `_2P`:
 
-```
+```bash
 103N_GBC_1P.fastq.gz   →  sample = 103N_GBC
 50T_CRC_1P.fastq.gz    →  sample = 50T_CRC
 ```
@@ -355,7 +363,7 @@ SHA256 checkpoint on success, so a failure in one tool does not force re-running
 the others on resume.
 
 | Tool | Output | Purpose |
-|------|--------|---------|
+| ---- | ------ | ------- |
 | `infer_experiment.py` | `<sample>.strand.txt` | Library strandedness detection |
 | `read_distribution.py` | `<sample>.read_distribution.txt` | Genomic feature distribution |
 | `geneBody_coverage2.py` | `<sample>.geneBodyCoverage.{txt,pdf,...}` | 5'-to-3' coverage uniformity |
@@ -363,7 +371,7 @@ the others on resume.
 After geneBody_coverage2 completes, **ggplot2 PDF plots** are generated:
 
 | Plot | File | Description |
-|------|------|-------------|
+| ---- | ---- | ----------- |
 | Curves | `<sample>.geneBodyCoverage.curves.pdf` | Coverage distribution (geom_point + geom_line) |
 | Heatmap | `<sample>.geneBodyCoverage.heatMap.pdf` | Normalized coverage intensity (geom_tile) |
 
@@ -373,7 +381,7 @@ PDF generation is mandatory and included in the genebody SHA256 checkpoint.
 
 ## Output Structure
 
-```
+```bash
 <output>/
 ├── star/                                    STAR alignment outputs
 │   ├── <sample>_Aligned.sortedByCoord.out.bam
@@ -420,7 +428,7 @@ PDF generation is mandatory and included in the genebody SHA256 checkpoint.
 The following ENCODE-compliant STAR parameters are used:
 
 | Parameter | Value | Purpose |
-|-----------|-------|---------|
+| --------- | ----- | ------- |
 | `--twopassMode` | `Basic` | 2-pass mapping for novel splice junction discovery |
 | `--quantMode` | `TranscriptomeSAM GeneCounts` | Transcriptome BAM + gene-level counts |
 | `--outSAMtype` | `BAM SortedByCoordinate` | Coordinate-sorted BAM output |
@@ -465,7 +473,7 @@ Completeness is determined entirely by whether a valid SHA256 checkpoint exists.
 Each sample has up to five checkpoint files:
 
 | Step | Checkpoint File | Files Hashed |
-|------|----------------|--------------|
+| ---- | --------------- | ------------ |
 | **STAR** | `<sample>.star.sha256` | Log files, BAI, transcriptome BAM, counts, junctions |
 | **deeptools** | `<sample>.deeptools.sha256` | Bigwig file |
 | **infer** | `<sample>.infer.sha256` | `strand.txt` |
@@ -482,7 +490,7 @@ removed, modified, or truncated.
 Each step gets its own file at `.checkpoints/<sample>.<step>.sha256` containing
 a single line — the 64-character hex SHA256 digest:
 
-```
+```bash
 a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd
 ```
 
@@ -495,7 +503,7 @@ On re-run, the pipeline checks all five steps per sample and determines what
 needs to rerun:
 
 | Status | Condition | Action |
-|--------|-----------|--------|
+| ------ | --------- | ------ |
 | **AllDone** | All 5 checkpoints valid | Skip sample entirely |
 | **Phase1Changed** | STAR checkpoint invalid | Clean all outputs, rerun STAR + deeptools + RSeQC |
 | **Phase2Changed** | deeptools checkpoint invalid, STAR OK | Clean deeptools + RSeQC outputs, rerun Phase 2 + 3 |
@@ -537,7 +545,7 @@ star-rseqc /data/Paired/ -o results
 The pipeline features a full-screen alternate-screen terminal interface built
 with `crossterm`. Each phase gets its own TUI instance:
 
-```
+```bash
 ══════════════════════════════════════════════════════════════════════════════
                              STAR-RSeQC v0.1.0
         STAR 2-Pass Alignment + RSeQC Quality Control | Paired-End RNA-seq
@@ -569,6 +577,7 @@ with `crossterm`. Each phase gets its own TUI instance:
 ```
 
 Features:
+
 - Centered title and subtitle with `═` separator bars
 - Phase indicator with resume count from previous runs
 - Overall progress bar with percentage, elapsed, ETA, estimated completion time,
@@ -655,7 +664,7 @@ Override with explicit flags: `-j 2 -t 16 --bam-sort-ram 4000000000`
 
 ## Architecture
 
-```
+```bash
 main()
  ├── parse_args()              Hand-rolled arg parser (no external crate)
  ├── validate_environment()    Check STAR, samtools, RSeQC, deeptools, Rscript, genome index, GTF
@@ -674,6 +683,7 @@ main()
 ```
 
 Key design decisions:
+
 - **No `clap`** — hand-rolled argument parser keeps the dependency tree minimal
 - **No `rayon`** — scoped thread work queue with `AtomicUsize` work-stealing
   gives fine-grained control over job slot assignment and TUI updates
