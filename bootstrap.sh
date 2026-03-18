@@ -11,6 +11,7 @@ CONDA_ENV_NAME="star-rseqc"
 MODE=""
 NON_INTERACTIVE=0
 AUTO_RUN=0
+RUN_ANALYSIS=0
 FASTQ_DIR=""
 OUTPUT_DIR=""
 GENOME_DIR=""
@@ -53,7 +54,7 @@ Usage: ./bootstrap.sh [options]
 Options:
   --mode <docker|conda|manual>  Preselect setup mode (skip prompt)
   --non-interactive             Do not prompt; requires --mode
-  --run                         Automatically run full analysis after dry-run
+  --run                         Run analysis after setup (dry-run + optional full run)
   --fastq-dir <DIR>             FASTQ input directory (host path)
   --output-dir <DIR>            Output directory (host path)
   --genome-dir <DIR>            STAR genome index directory (host path)
@@ -84,14 +85,17 @@ parse_args() {
         ;;
       --run)
         AUTO_RUN=1
+        RUN_ANALYSIS=1
         shift
         ;;
       --fastq-dir)
         FASTQ_DIR="${2:-}"
+        RUN_ANALYSIS=1
         shift 2
         ;;
       --output-dir)
         OUTPUT_DIR="${2:-}"
+        RUN_ANALYSIS=1
         shift 2
         ;;
       --genome-dir)
@@ -240,13 +244,24 @@ first_match() {
   local pattern
   for pattern in "$@"; do
     local f
-    f="$(find "$dir" -maxdepth 1 -type f -iname "$pattern" | sort | head -n 1 || true)"
+    f="$(find "$dir" -maxdepth 4 -type f -iname "$pattern" | sort | head -n 1 || true)"
     if [[ -n "$f" ]]; then
       printf "%s" "$f"
       return 0
     fi
   done
   return 1
+}
+
+normalize_gtf_if_gz() {
+  if [[ -n "$GTF_FILE" && "$GTF_FILE" == *.gz ]]; then
+    have gzip || die "gzip is required to unpack GTF: $GTF_FILE"
+    local out_gtf="${GTF_FILE%.gz}"
+    log "Detected compressed GTF, unpacking: $GTF_FILE -> $out_gtf"
+    gzip -dc "$GTF_FILE" > "$out_gtf"
+    GTF_FILE="$out_gtf"
+    success "Using uncompressed GTF: $GTF_FILE"
+  fi
 }
 
 interactive_reference_prompt() {
@@ -274,9 +289,6 @@ interactive_path_prompt() {
   fi
 
   echo
-  FASTQ_DIR="$(prompt_default "FASTQ directory (contains *_1P.fastq.gz, *_2P.fastq.gz)" "$FASTQ_DIR")"
-  OUTPUT_DIR="$(prompt_default "Output directory" "$OUTPUT_DIR")"
-
   interactive_reference_prompt
 
   case "$REF_SETUP_MODE" in
@@ -337,6 +349,29 @@ interactive_path_prompt() {
       die "Unexpected REF_SETUP_MODE: $REF_SETUP_MODE"
       ;;
   esac
+}
+
+ensure_analysis_paths() {
+  if [[ $RUN_ANALYSIS -ne 1 ]]; then
+    return 0
+  fi
+
+  if [[ -z "$OUTPUT_DIR" ]]; then
+    OUTPUT_DIR="$ROOT_DIR/results"
+  fi
+
+  if [[ -z "$FASTQ_DIR" ]]; then
+    if [[ $NON_INTERACTIVE -eq 1 ]]; then
+      die "--fastq-dir is required when --run/analysis is requested in non-interactive mode"
+    fi
+    FASTQ_DIR="$(prompt_default "FASTQ directory (contains *_1P.fastq.gz, *_2P.fastq.gz)" "$ROOT_DIR/data")"
+  fi
+  if [[ $NON_INTERACTIVE -eq 0 ]]; then
+    OUTPUT_DIR="$(prompt_default "Output directory" "$OUTPUT_DIR")"
+  fi
+
+  FASTQ_DIR="$(resolve_path "$FASTQ_DIR")"
+  OUTPUT_DIR="$(resolve_path "$OUTPUT_DIR")"
 }
 
 build_star_index_local() {
@@ -618,12 +653,6 @@ load_path_defaults() {
     if [[ -n "$cli_threads" ]]; then THREADS="$cli_threads"; fi
   fi
 
-  if [[ -z "$FASTQ_DIR" ]]; then
-    FASTQ_DIR="$ROOT_DIR/data"
-  fi
-  if [[ -z "$OUTPUT_DIR" ]]; then
-    OUTPUT_DIR="$ROOT_DIR/results"
-  fi
   if [[ -z "$GENOME_DIR" ]]; then
     GENOME_DIR="$ROOT_DIR/refs/star_index"
   fi
@@ -637,8 +666,12 @@ load_path_defaults() {
   if [[ "$GENOME_DIR" == /work/* ]]; then GENOME_DIR="$ROOT_DIR/${GENOME_DIR#/work/}"; fi
   if [[ "$GTF_FILE" == /work/* ]]; then GTF_FILE="$ROOT_DIR/${GTF_FILE#/work/}"; fi
 
-  FASTQ_DIR="$(resolve_path "$FASTQ_DIR")"
-  OUTPUT_DIR="$(resolve_path "$OUTPUT_DIR")"
+  if [[ -n "$FASTQ_DIR" ]]; then
+    FASTQ_DIR="$(resolve_path "$FASTQ_DIR")"
+  fi
+  if [[ -n "$OUTPUT_DIR" ]]; then
+    OUTPUT_DIR="$(resolve_path "$OUTPUT_DIR")"
+  fi
   GENOME_DIR="$(resolve_path "$GENOME_DIR")"
   GTF_FILE="$(resolve_path "$GTF_FILE")"
   if [[ -n "$REF_SOURCE_DIR" ]]; then
@@ -694,6 +727,13 @@ run_docker_mode() {
   docker compose build
 
   prepare_references_docker
+  normalize_gtf_if_gz
+  if [[ $RUN_ANALYSIS -ne 1 ]]; then
+    success "Setup complete. Dependencies and references are ready."
+    log "Run analysis later with: ./setup.sh --mode docker --run --fastq-dir ./data --output-dir ./results"
+    return 0
+  fi
+  ensure_analysis_paths
   ensure_precheck_script
 
   log "Running host preflight checks"
@@ -761,6 +801,13 @@ run_conda_mode() {
   fi
 
   prepare_references_conda "$ccmd"
+  normalize_gtf_if_gz
+  if [[ $RUN_ANALYSIS -ne 1 ]]; then
+    success "Setup complete. Conda environment and references are ready."
+    log "Run analysis later with: ./setup.sh --mode conda --run --fastq-dir ./data --output-dir ./results"
+    return 0
+  fi
+  ensure_analysis_paths
 
   log "Running host preflight checks"
   run_preflight
@@ -801,6 +848,13 @@ run_manual_mode() {
   apply_ref_dir_hints
   interactive_path_prompt
   prepare_references_host
+  normalize_gtf_if_gz
+  if [[ $RUN_ANALYSIS -ne 1 ]]; then
+    success "Setup complete. References are ready."
+    log "Run analysis later with: ./setup.sh --mode manual --run --fastq-dir ./data --output-dir ./results"
+    return 0
+  fi
+  ensure_analysis_paths
   ensure_precheck_script
 
   local missing=0

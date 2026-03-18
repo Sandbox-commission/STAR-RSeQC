@@ -130,15 +130,25 @@ If you are starting from scratch, use the interactive setup script:
 ./setup.sh
 ```
 
+By default, `setup.sh` performs setup only (installs dependencies and prepares
+references). It does not ask for FASTQ paths unless you explicitly request
+analysis with `--run`.
+
+Run analysis later when ready:
+
+```bash
+./setup.sh --mode conda --run --fastq-dir ./data --output-dir ./results
+```
+
 It will prompt you for:
 
 1. Install/run mode:
    - `1) Docker`
    - `2) Conda`
    - `3) Manual`
-2. Input/output paths:
-   - FASTQ directory
-   - output directory
+2. Reference setup path(s):
+   - reference directory (auto-detection)
+   - optional file-specific overrides when needed
 3. Reference setup mode:
    - `1) Existing STAR index + GTF`
    - `2) Local FASTA/FNA/FA + GTF (build index now)`
@@ -147,33 +157,27 @@ It will prompt you for:
 Non-interactive examples:
 
 ```bash
-# Existing references
+# Existing references (setup-only)
 ./setup.sh --mode conda --non-interactive \
-  --fastq-dir ./data \
-  --output-dir ./results \
   --ref-dir ./refs \
   --genome-dir ./refs/star_index \
   --gtf ./refs/annotation.gtf
 
-# Build STAR index from local FASTA + GTF
+# Build STAR index from local FASTA + GTF (setup-only)
 ./setup.sh --mode manual --non-interactive \
   --ref-mode local \
   --ref-dir ./refs \
   --ref-source-dir ./refs \
   --ref-fasta ./refs/genome.fa.gz \
   --gtf ./refs/annotation.gtf \
-  --genome-dir ./refs/star_index \
-  --fastq-dir ./data \
-  --output-dir ./results
+  --genome-dir ./refs/star_index
 
-# Download from Ensembl and build index
+# Download from Ensembl and build index (setup-only)
 ./setup.sh --mode conda --non-interactive \
   --ref-mode ensembl \
   --ref-dir ./refs \
   --ensembl-release 113 \
-  --read-length 101 \
-  --fastq-dir ./data \
-  --output-dir ./results
+  --read-length 101
 ```
 
 ### Dependencies (Cargo.toml)
