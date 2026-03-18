@@ -8,6 +8,10 @@ description = "STAR 2-pass alignment + RSeQC QC pipeline for paired-end RNA-seq"
 name = "star-rseqc"
 path = "src/main.rs"
 
+[features]
+default = ["tui"]
+tui = []
+
 [dependencies]
 chrono = "0.4"
 crossterm = "0.28"

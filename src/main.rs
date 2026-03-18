@@ -1,10 +1,13 @@
 use chrono::Local;
+#[cfg(feature = "tui")]
 use crossterm::{
     cursor, event, execute,
     style::{self, Attribute, Color},
-    terminal::{self, ClearType},
+    terminal,
     tty::IsTty,
 };
+#[cfg(not(feature = "tui"))]
+use crossterm::tty::IsTty;
 use glob::glob;
 use std::collections::{HashMap, VecDeque};
 use std::env;
@@ -16,6 +19,30 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "tui")]
+mod tui;
+#[cfg(feature = "tui")]
+use tui::{fmt_duration, print_gradient_bar, compute_layout, RenderSnapshot, JobSlotSnapshot};
+
+#[cfg(not(feature = "tui"))]
+mod tui_stubs {
+    use std::time::Duration;
+    pub fn fmt_duration(d: Duration) -> String {
+        let secs = d.as_secs();
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        let s = secs % 60;
+        if h > 0 { format!("{h:02}:{m:02}:{s:02}") } else { format!("{m:02}:{s:02}") }
+    }
+    pub fn fmt_secs(s: f64) -> String {
+        if s.is_nan() || s.is_infinite() || s < 0.0 { return "??:??".to_string(); }
+        if s >= 359_999.0 { return "99:59:59+".to_string(); }
+        fmt_duration(Duration::from_secs_f64(s))
+    }
+}
+#[cfg(not(feature = "tui"))]
+use tui_stubs::fmt_duration;
+
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
@@ -24,6 +51,8 @@ const GENOME_DIR: &str =
     "/home/cml/humandb/transcriptomeindex/ensembl113/star_hg38_101bp_index";
 const GTF_FILE: &str =
     "/home/cml/humandb/transcriptomeindex/ensembl113/Homo_sapiens.GRCh38.113.gtf";
+const BED12_FILE: &str =
+    "/home/cml/humandb/transcriptomeindex/ensembl113/star_hg38_101bp_index/annotation.bed12";
 const STAR_ENV: &str = "/home/cml/miniforge3/envs/star";
 const RSEQC_ENV: &str = "/home/cml/miniforge3/envs/RSeQC";
 const DEEPTOOLS_ENV: &str = "/home/cml/miniforge3/envs/deeptools";
@@ -35,7 +64,7 @@ const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
 fn usage() {
     eprintln!();
-    let w = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
+    let w = crossterm::terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
     let sep = "═".repeat(w);
     eprintln!("{sep}");
     eprintln!("{:^width$}", format!("STAR-RSeQC v{}", env!("CARGO_PKG_VERSION")), width = w);
@@ -539,9 +568,136 @@ struct JobSlot {
     sample: String,
     step: String,
     started: Instant,
+    pct: Arc<AtomicUsize>,
 }
 
-// ─── Progress state (msi-calc style) ─────────────────────────────────────────
+// ─── Overall progress (shared across all phases) ─────────────────────────────
+
+struct OverallProgress {
+    /// Per-phase totals (set when each phase starts).
+    phase_total: [AtomicUsize; 3],
+    /// Per-phase done counts (completed + failed) — used for phases 1 & 2.
+    phase_done: [AtomicUsize; 3],
+    /// Phase weights: 0.45, 0.25, 0.30
+    phase_weights: [f64; 3],
+    /// Phase 3 sub-phase totals: [infer, rdist, genebody]
+    p3_sub_total: [AtomicUsize; 3],
+    /// Phase 3 sub-phase done: [infer, rdist, genebody]
+    p3_sub_done: [AtomicUsize; 3],
+    /// Phase 3 sub-phase weights (absolute): infer=0.07, rdist=0.08, genebody=0.15
+    p3_sub_weights: [f64; 3],
+    start_time: Instant,
+    current_phase: AtomicUsize,
+    total_phases: usize,
+}
+
+impl OverallProgress {
+    fn new(total_phases: usize) -> Self {
+        Self {
+            phase_total: [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+            phase_done: [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+            phase_weights: [0.45, 0.25, 0.30],
+            p3_sub_total: [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+            p3_sub_done: [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+            p3_sub_weights: [0.07, 0.08, 0.15],
+            start_time: Instant::now(),
+            current_phase: AtomicUsize::new(1),
+            total_phases,
+        }
+    }
+
+    /// Set the total sample count for a phase (0-indexed).
+    fn set_phase_total(&self, phase: usize, total: usize) {
+        if phase < 3 {
+            self.phase_total[phase].store(total, Ordering::Relaxed);
+        }
+    }
+
+    /// Set the total for a Phase 3 sub-phase: 0=infer, 1=rdist, 2=genebody.
+    fn set_p3_sub_total(&self, sub: usize, total: usize) {
+        if sub < 3 {
+            self.p3_sub_total[sub].store(total, Ordering::Relaxed);
+        }
+    }
+
+    /// Increment done count for a phase (0-indexed). Used for phases 1 & 2.
+    fn inc_phase_done(&self, phase: usize) {
+        if phase < 3 {
+            self.phase_done[phase].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Increment done for a Phase 3 sub-phase: 0=infer, 1=rdist, 2=genebody.
+    fn inc_p3_sub_done(&self, sub: usize) {
+        if sub < 3 {
+            self.p3_sub_done[sub].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Phase 3 weighted fraction (0.0–1.0) using sub-phase weights relative to phase 3's 0.30.
+    fn p3_weighted_frac(&self) -> f64 {
+        let mut frac = 0.0;
+        for i in 0..3 {
+            let t = self.p3_sub_total[i].load(Ordering::Relaxed);
+            let d = self.p3_sub_done[i].load(Ordering::Relaxed);
+            if t > 0 {
+                // sub weight relative to phase 3: e.g. 0.07/0.30
+                frac += (self.p3_sub_weights[i] / self.phase_weights[2]) * (d.min(t) as f64 / t as f64);
+            }
+        }
+        frac.min(1.0)
+    }
+
+    /// Weighted fraction complete (0.0 – 1.0).
+    /// Future phases (not yet started, total=0) contribute 0%.
+    /// Past phases that were skipped (total=0, phase < current) contribute 100%.
+    fn weighted_frac(&self) -> f64 {
+        let current = self.current_phase.load(Ordering::Relaxed); // 1-indexed
+        let mut frac = 0.0;
+        for i in 0..2 {
+            // Phases 1 & 2: simple done/total
+            let phase_num = i + 1; // 1-indexed
+            let t = self.phase_total[i].load(Ordering::Relaxed);
+            let d = self.phase_done[i].load(Ordering::Relaxed);
+            if t > 0 {
+                frac += self.phase_weights[i] * (d.min(t) as f64 / t as f64);
+            } else if phase_num < current {
+                frac += self.phase_weights[i];
+            }
+        }
+        // Phase 3: use sub-phase weighted tracking
+        let p3_total = self.phase_total[2].load(Ordering::Relaxed);
+        if p3_total > 0 || current > 3 {
+            // Phase 3 has work or is past — use sub-phase fractions
+            for i in 0..3 {
+                let t = self.p3_sub_total[i].load(Ordering::Relaxed);
+                let d = self.p3_sub_done[i].load(Ordering::Relaxed);
+                if t > 0 {
+                    frac += self.p3_sub_weights[i] * (d.min(t) as f64 / t as f64);
+                }
+            }
+        } else if 3 < current {
+            // Past skipped phase
+            frac += self.phase_weights[2];
+        }
+        frac.min(1.0)
+    }
+
+    /// Total done across all phases.
+    fn total_done(&self) -> usize {
+        let p1p2: usize = self.phase_done[..2].iter().map(|d| d.load(Ordering::Relaxed)).sum();
+        // For phase 3, count a sample as done when all its sub-tools are done
+        // Use phase_done[2] which still tracks per-sample completion
+        p1p2 + self.phase_done[2].load(Ordering::Relaxed)
+    }
+
+    /// Total samples across all phases.
+    fn total_samples(&self) -> usize {
+        self.phase_total.iter().map(|t| t.load(Ordering::Relaxed)).sum()
+    }
+}
+
+// ─── Progress state (per-phase) ──────────────────────────────────────────────
 
 struct ProgressState {
     total: usize,
@@ -553,10 +709,11 @@ struct ProgressState {
     phase_label: Mutex<String>,
     start_time: Instant,
     completed_durations: Mutex<Vec<f64>>,
+    overall: Option<Arc<OverallProgress>>,
 }
 
 impl ProgressState {
-    fn new(total: usize, parallel_jobs: usize, phase: &str) -> Self {
+    fn new(total: usize, parallel_jobs: usize, phase: &str, overall: Option<Arc<OverallProgress>>) -> Self {
         let slots = (0..parallel_jobs).map(|_| None).collect();
         Self {
             total,
@@ -568,6 +725,7 @@ impl ProgressState {
             phase_label: Mutex::new(phase.to_string()),
             start_time: Instant::now(),
             completed_durations: Mutex::new(Vec::new()),
+            overall,
         }
     }
 
@@ -578,7 +736,18 @@ impl ProgressState {
                     sample: sample.to_string(),
                     step: step.to_string(),
                     started: Instant::now(),
+                    pct: Arc::new(AtomicUsize::new(0)),
                 });
+            }
+        }
+    }
+
+    fn update_pct(&self, slot: usize, pct: usize) {
+        if let Ok(jobs) = self.active_jobs.lock() {
+            if slot < jobs.len() {
+                if let Some(ref job) = jobs[slot] {
+                    job.pct.store(pct.min(100), Ordering::Relaxed);
+                }
             }
         }
     }
@@ -767,9 +936,7 @@ fn sha256_step(output_dir: &Path, sample_name: &str, step: &str) -> String {
                 qc_dir.join(format!("{sample_name}.geneBodyCoverage.txt")),
                 qc_dir.join(format!("{sample_name}.geneBodyCoverage_plot.r")),
                 qc_dir.join(format!("{sample_name}.geneBodyCoverage.pdf")),
-                qc_dir.join(format!("{sample_name}.geneBodyCoverage.curves.r")),
                 qc_dir.join(format!("{sample_name}.geneBodyCoverage.curves.pdf")),
-                qc_dir.join(format!("{sample_name}.geneBodyCoverage.heatmap.r")),
                 qc_dir.join(format!("{sample_name}.geneBodyCoverage.heatMap.pdf")),
             ])
         }
@@ -932,7 +1099,10 @@ fn check_resume_all_parallel(output_dir: &Path, samples: &[Sample]) -> Vec<(Stri
                 }
                 let sample = &samps[idx];
                 let status = check_resume(&od, &sample.name);
-                res_arc.lock().unwrap_or_else(|e| e.into_inner()).push((sample.name.clone(), status));
+                res_arc.lock().unwrap_or_else(|e| {
+                    eprintln!("Warning: mutex poisoned in resume check worker — recovering");
+                    e.into_inner()
+                }).push((sample.name.clone(), status));
             }
         });
 
@@ -945,7 +1115,10 @@ fn check_resume_all_parallel(output_dir: &Path, samples: &[Sample]) -> Vec<(Stri
         }
     }
 
-    let final_results = results.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let final_results = results.lock().unwrap_or_else(|e| {
+        eprintln!("Warning: mutex poisoned in resume results — recovering");
+        e.into_inner()
+    }).clone();
     final_results
 }
 
@@ -975,7 +1148,10 @@ fn discover_samples(fastq_dir: &Path) -> Vec<Sample> {
     };
 
     for r1 in entries {
-        let r1_name = r1.file_name().unwrap().to_string_lossy().to_string();
+        let r1_name = match r1.file_name() {
+            Some(n) => n.to_string_lossy().to_string(),
+            None => continue,
+        };
 
         let sample_name = match r1_name.strip_suffix("_1P.fastq.gz") {
             Some(n) => n.to_string(),
@@ -994,7 +1170,10 @@ fn discover_samples(fastq_dir: &Path) -> Vec<Sample> {
         }
 
         let r2_name = format!("{}_2P.fastq.gz", sample_name);
-        let r2 = r1.parent().unwrap().join(&r2_name);
+        let r2 = match r1.parent() {
+            Some(p) => p.join(&r2_name),
+            None => continue,
+        };
 
         if !r2.exists() {
             eprintln!("Warning: skipping {} — R2 not found ({})", sample_name, r2.display());
@@ -1182,6 +1361,44 @@ fn run_cancellable(mut cmd: Command) -> Result<bool, String> {
     }
 }
 
+/// Run a command with cancellation support, piping `input` to the child's stdin.
+/// Returns Ok(true) on success, Ok(false) on non-zero exit, Err on cancel/spawn failure.
+fn run_cancellable_with_stdin(mut cmd: Command, input: &str) -> Result<bool, String> {
+    cmd.stdin(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to launch: {e}"))?;
+    // Write stdin in a background thread to avoid deadlock if the child blocks.
+    let stdin = child.stdin.take().ok_or("Failed to open stdin pipe")?;
+    let input_owned = input.to_string();
+    let stdin_thread = std::thread::spawn(move || {
+        use std::io::Write;
+        let mut w = stdin;
+        if let Err(e) = w.write_all(input_owned.as_bytes()) {
+            eprintln!("Warning: stdin write failed: {e}");
+        }
+        drop(w); // close stdin so child sees EOF
+    });
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let _ = stdin_thread.join();
+                return Ok(status.success());
+            }
+            Ok(None) => {
+                if is_cancelled() {
+                    kill_with_timeout(&mut child);
+                    let _ = stdin_thread.join();
+                    return Err("Cancelled".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => {
+                let _ = stdin_thread.join();
+                return Err(format!("Wait error: {e}"));
+            }
+        }
+    }
+}
+
 /// Shared implementation for capture variants.
 /// `combine` = true → stdout + stderr concatenated (for infer_experiment.py which writes to stderr).
 /// `combine` = false → stdout only, stderr drained silently.
@@ -1291,148 +1508,11 @@ fn make_log_stdio(log_dir: &Path, name: &str) -> Result<(Stdio, Stdio), String> 
     }
 }
 
-/// Generate R script for gene body coverage curves plot using ggplot2
-fn create_curves_r_script(output_prefix: &str) -> Result<(), String> {
-    let txt_file = format!("{}.geneBodyCoverage.txt", output_prefix);
-    let pdf_file = format!("{}.geneBodyCoverage.curves.pdf", output_prefix);
-
-    // Validate input file exists
-    if !Path::new(&txt_file).exists() {
-        return Err(format!("Input file not found: {}", txt_file));
-    }
-
-    let script = format!(
-        r#"tryCatch({{
-  # Load required packages
-  if (!require('ggplot2', quietly=TRUE)) {{
-    stop('ggplot2 package required for visualization. Install with: install.packages("ggplot2")')
-  }}
-
-  # Read data
-  data <- read.table('{input}', header=TRUE, sep='\t')
-
-  # Validate data
-  if (nrow(data) == 0) {{
-    stop('Input file is empty')
-  }}
-  if (!all(c('percentile', 'count') %in% names(data))) {{
-    stop('Input file must contain percentile and count columns')
-  }}
-
-  # Create plot
-  p <- ggplot(data, aes(x=percentile, y=count)) +
-    geom_point(size=2, color='steelblue') +
-    geom_line(color='steelblue', linewidth=0.8) +
-    labs(
-      title='Gene Body Coverage Distribution',
-      x='Gene Body Percentile (5\' to 3\')',
-      y='Average Coverage',
-      subtitle='Coverage across gene body regions'
-    ) +
-    theme_bw() +
-    theme(
-      plot.title=element_text(size=14, face='bold'),
-      plot.subtitle=element_text(size=11, color='grey40'),
-      axis.title=element_text(size=12),
-      panel.grid.minor=element_blank()
-    )
-
-  # Save plot
-  ggsave('{output}', p, width=10, height=6, dpi=150)
-}}, error = function(e) {{
-  cat('Error generating curves plot:', conditionMessage(e), '\n', file=stderr())
-  quit(status=1)
-}})
-"#,
-        input = txt_file,
-        output = pdf_file
-    );
-
-    let script_file = format!("{}.geneBodyCoverage.curves.r", output_prefix);
-    std::fs::write(&script_file, script)
-        .map_err(|e| format!("Failed to write curves R script: {e}"))
-}
-
-/// Generate R script for gene body coverage heatmap plot using ggplot2
-fn create_heatmap_r_script(output_prefix: &str) -> Result<(), String> {
-    let txt_file = format!("{}.geneBodyCoverage.txt", output_prefix);
-    let pdf_file = format!("{}.geneBodyCoverage.heatMap.pdf", output_prefix);
-
-    // Validate input file exists
-    if !Path::new(&txt_file).exists() {
-        return Err(format!("Input file not found: {}", txt_file));
-    }
-
-    let script = format!(
-        r#"tryCatch({{
-  # Load required packages
-  if (!require('ggplot2', quietly=TRUE)) {{
-    stop('ggplot2 package required for visualization. Install with: install.packages("ggplot2")')
-  }}
-
-  # Read data
-  data <- read.table('{input}', header=TRUE, sep='\t')
-
-  # Validate data
-  if (nrow(data) == 0) {{
-    stop('Input file is empty')
-  }}
-  if (!all(c('percentile', 'count') %in% names(data))) {{
-    stop('Input file must contain percentile and count columns')
-  }}
-
-  # Normalize counts for heatmap visualization (0-1 scale)
-  data$norm_count <- (data$count - min(data$count)) / (max(data$count) - min(data$count))
-
-  # Create heatmap
-  p <- ggplot(data, aes(x=percentile, y=1, fill=norm_count)) +
-    geom_tile(height=0.8) +
-    scale_fill_gradient(low='white', high='darkblue', name='Normalized\nCoverage') +
-    scale_x_continuous(breaks=seq(0, 100, 10)) +
-    labs(
-      title='Gene Body Coverage Heatmap',
-      x='Gene Body Percentile (5\' to 3\')',
-      y='',
-      subtitle='Intensity represents relative coverage level'
-    ) +
-    theme_bw() +
-    theme(
-      plot.title=element_text(size=14, face='bold'),
-      plot.subtitle=element_text(size=11, color='grey40'),
-      axis.title=element_text(size=12),
-      axis.title.y=element_blank(),
-      axis.text.y=element_blank(),
-      axis.ticks.y=element_blank(),
-      panel.grid=element_blank()
-    )
-
-  # Save plot
-  ggsave('{output}', p, width=12, height=3, dpi=150)
-}}, error = function(e) {{
-  cat('Error generating heatmap plot:', conditionMessage(e), '\n', file=stderr())
-  quit(status=1)
-}})
-"#,
-        input = txt_file,
-        output = pdf_file
-    );
-
-    let script_file = format!("{}.geneBodyCoverage.heatmap.r", output_prefix);
-    std::fs::write(&script_file, script)
-        .map_err(|e| format!("Failed to write heatmap R script: {e}"))
-}
-
-/// Run an R script via Rscript with proper error handling
-fn run_r_script(rscript_path: &str) -> Result<(), String> {
-    // Validate script exists
-    if !Path::new(rscript_path).exists() {
-        return Err(format!("R script not found: {}", rscript_path));
-    }
-
+/// Pipe R code to `Rscript --vanilla -` via stdin (no .r file artifact).
+fn run_inline_r(r_code: &str) -> Result<(), String> {
     let mut cmd = Command::new("Rscript");
-    cmd.arg("--vanilla").arg(rscript_path);
-
-    match run_cancellable(cmd) {
+    cmd.args(["--vanilla", "-"]);
+    match run_cancellable_with_stdin(cmd, r_code) {
         Ok(true) => Ok(()),
         Ok(false) => Err("Rscript exited with non-zero status".to_string()),
         Err(e) if e == "Cancelled" => Err("Cancelled".to_string()),
@@ -1453,6 +1533,190 @@ fn validate_pdf_created(pdf_path: &str) -> Result<(), String> {
         Ok(_) => Err(format!("PDF file appears empty or corrupted: {}", pdf_path)),
         Err(e) => Err(format!("Cannot read PDF file: {}: {}", pdf_path, e)),
     }
+}
+
+// ─── STAR progress file watcher ──────────────────────────────────────────────
+
+/// Spawn a background thread that polls STAR's Log.progress.out for mapping progress.
+/// Returns a done_flag that the caller sets when the STAR process finishes.
+/// Spawn a watcher thread that estimates STAR completion by parsing Log.out
+/// for phase transitions and Log.progress.out for data-line count within
+/// mapping passes.
+///
+/// STAR 2-pass phases and weight budget (0–100%):
+///   0–5%   genome loading
+///   5–40%  1st pass mapping  (data lines in Log.progress.out)
+///  40–50%  junction insertion / pass-2 prep
+///  50–85%  2nd pass mapping  (data lines in Log.progress.out)
+///  85–100% BAM sorting + finishing
+///
+/// Within each mapping pass the progress fraction is estimated from
+/// data-line count in Log.progress.out: STAR emits one line every ~60s
+/// of mapping, so `lines / expected_lines` gives a reasonable proxy.
+/// We cap the within-pass fraction at 0.95 so the bar never hits 100%
+/// before the process actually finishes.
+fn spawn_star_progress_watcher(
+    progress_file: PathBuf,
+    log_out_file: PathBuf,
+    pct_atom: Arc<AtomicUsize>,
+    step_label: Arc<Mutex<String>>,
+    done_flag: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        // We track the highest phase reached to avoid going backwards.
+        let mut phase_pct: usize = 0;
+        // Expected data lines per mapping pass (heuristic: ~60–80 lines for a
+        // typical 40–50M read RNA-seq sample). We start conservative and
+        // refine after pass 1 finishes.
+        let mut expected_pass1_lines: f64 = 60.0;
+        let mut pass1_actual_lines: Option<usize> = None;
+
+        loop {
+            if done_flag.load(Ordering::Relaxed) || CANCELLED.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+
+            // ── Parse Log.out for phase markers ──
+            let mut saw_genome_loaded = false;
+            let mut saw_pass1_start = false;
+            let mut saw_pass1_finish = false;
+            let mut saw_pass2_junctions_done = false;
+            let mut saw_pass2_mapping = false;
+            let mut saw_all_done = false;
+
+            if log_out_file.exists() {
+                if let Ok(content) = fs::read_to_string(&log_out_file) {
+                    for line in content.lines() {
+                        if line.contains("Finished loading the genome") {
+                            saw_genome_loaded = true;
+                        }
+                        if line.contains("finished inserting junctions into genome")
+                            || line.contains("Started 1st pass mapping")
+                        {
+                            saw_pass1_start = true;
+                        }
+                        if line.contains("Finished 1st pass mapping") {
+                            saw_pass1_finish = true;
+                        }
+                        if line.contains("Finished inserting junction indices")
+                            && saw_pass1_finish
+                        {
+                            saw_pass2_junctions_done = true;
+                        }
+                        if line.contains("Starting to map file") && saw_pass1_finish {
+                            saw_pass2_mapping = true;
+                        }
+                    }
+                }
+            }
+
+            // ── Parse Log.progress.out for data lines ──
+            let mut data_lines: usize = 0;
+            let mut pass2_data_lines: usize = 0;
+            let mut in_pass2 = false;
+
+            if progress_file.exists() {
+                if let Ok(content) = fs::read_to_string(&progress_file) {
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.contains("ALL DONE") {
+                            saw_all_done = true;
+                        }
+                        if trimmed.starts_with("Started 1st pass") {
+                            // reset for pass 1 counting
+                        } else if trimmed.starts_with("Finished 1st pass") {
+                            in_pass2 = false; // will flip on next "Started" in Log.out
+                            pass1_actual_lines = Some(data_lines);
+                        } else if trimmed.starts_with("Started 2nd pass")
+                            || (saw_pass1_finish && !in_pass2 && data_lines > 0 && trimmed.contains("Started"))
+                        {
+                            in_pass2 = true;
+                            pass2_data_lines = 0;
+                        }
+                        // Count data lines (start with date like "Mar" or month abbreviation,
+                        // and have enough fields with numeric data)
+                        let fields: Vec<&str> = trimmed.split_whitespace().collect();
+                        if fields.len() >= 6 {
+                            // Check if 3rd field (after date + time) is numeric (speed)
+                            if fields.get(3).and_then(|f| f.parse::<f64>().ok()).is_some() {
+                                data_lines += 1;
+                                if in_pass2 {
+                                    pass2_data_lines += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Refine expected lines after pass 1
+            if let Some(p1_lines) = pass1_actual_lines {
+                if p1_lines > 0 {
+                    expected_pass1_lines = p1_lines as f64;
+                }
+            }
+            let expected_pass2_lines = expected_pass1_lines * 1.1; // pass 2 is slightly longer
+
+            // ── Compute percentage from phase ──
+            let new_pct = if saw_all_done {
+                99 // reserve 100 for when STAR process actually exits
+            } else if saw_pass2_mapping {
+                // 50–85%: 2nd pass mapping
+                let frac = (pass2_data_lines as f64 / expected_pass2_lines).min(0.95);
+                50 + (frac * 35.0) as usize
+            } else if saw_pass2_junctions_done {
+                50
+            } else if saw_pass1_finish {
+                // 40–50%: junction insertion / pass 2 prep
+                if saw_pass2_junctions_done { 50 } else { 42 }
+            } else if saw_pass1_start {
+                // 5–40%: 1st pass mapping
+                let pass1_lines = if pass1_actual_lines.is_some() {
+                    pass1_actual_lines.unwrap()
+                } else {
+                    data_lines
+                };
+                let frac = (pass1_lines as f64 / expected_pass1_lines).min(0.95);
+                5 + (frac * 35.0) as usize
+            } else if saw_genome_loaded {
+                5
+            } else {
+                // Still loading genome
+                2
+            };
+
+            // Only go forward
+            if new_pct > phase_pct {
+                phase_pct = new_pct;
+            }
+            pct_atom.store(phase_pct.min(99), Ordering::Relaxed);
+
+            // ── Update step label ──
+            let label = if saw_all_done {
+                "BAM sorting"
+            } else if saw_pass2_mapping {
+                "STAR pass 2"
+            } else if saw_pass1_finish {
+                "Pass 2 prep"
+            } else if saw_pass1_start {
+                "STAR pass 1"
+            } else if saw_genome_loaded {
+                "Preparing junctions"
+            } else {
+                "Loading genome"
+            };
+            if let Ok(mut s) = step_label.lock() {
+                if s.as_str() != label {
+                    *s = label.to_string();
+                }
+            }
+
+            if saw_all_done || phase_pct >= 99 {
+                break;
+            }
+        }
+    })
 }
 
 // ─── Pipeline steps ──────────────────────────────────────────────────────────
@@ -1562,7 +1826,56 @@ fn run_star_sample(
             .stdout(stdout_cfg)
             .stderr(stderr_cfg);
 
-            match run_cancellable(cmd) {
+            // Spawn progress watcher thread for this STAR job
+            let progress_file = PathBuf::from(format!("{}Log.progress.out", out_prefix));
+            let log_out_file = PathBuf::from(format!("{}Log.out", out_prefix));
+            let pct_arc = {
+                let jobs = state.active_jobs.lock();
+                jobs.ok()
+                    .and_then(|j| j.get(slot).cloned().flatten())
+                    .map(|job| Arc::clone(&job.pct))
+                    .unwrap_or_else(|| Arc::new(AtomicUsize::new(0)))
+            };
+            let step_label: Arc<Mutex<String>> = Arc::new(Mutex::new("Loading genome".to_string()));
+            let watcher_done = Arc::new(AtomicBool::new(false));
+            let watcher_handle = spawn_star_progress_watcher(
+                progress_file,
+                log_out_file,
+                pct_arc,
+                Arc::clone(&step_label),
+                Arc::clone(&watcher_done),
+            );
+
+            // Use a scoped thread to sync the watcher's step label into the
+            // ProgressState job slot while STAR runs. std::thread::scope
+            // guarantees the spawned thread joins before the scope exits,
+            // so `state` and `step_label` remain valid.
+            let sync_done = Arc::new(AtomicBool::new(false));
+            let sync_done2 = Arc::clone(&sync_done);
+            let star_result = std::thread::scope(|scope| {
+                let label_ref = &step_label;
+                scope.spawn(move || {
+                    loop {
+                        if sync_done2.load(Ordering::Relaxed) || CANCELLED.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(200));
+                        if let Ok(label) = label_ref.lock() {
+                            state.update_step(slot, &label);
+                        }
+                    }
+                });
+                let result = run_cancellable(cmd);
+                sync_done.store(true, Ordering::Relaxed);
+                result
+            });
+
+            // Signal watcher to stop and join it
+            watcher_done.store(true, Ordering::Relaxed);
+            let _ = watcher_handle.join();
+            state.update_pct(slot, 100);
+
+            match star_result {
                 Ok(true) => {
                     state.add_event(format!("  DONE  {} — STAR alignment", sample.name));
                 }
@@ -1748,6 +2061,7 @@ fn run_rseqc_phase3(
     bed_path: &Path,
     state: &ProgressState,
     slot: usize,
+    overall: &OverallProgress,
 ) -> Result<(), String> {
     if is_cancelled() {
         return Err("Cancelled".to_string());
@@ -1758,13 +2072,31 @@ fn run_rseqc_phase3(
     let bam_path = star_dir.join(format!("{}_Aligned.sortedByCoord.out.bam", sample.name));
     let bw_path = config.output_dir.join("bigwig").join(format!("{}.bw", sample.name));
 
-    // SHA256 checkpoint is the sole resume authority — clean any pre-existing Phase 3
-    // outputs so per-tool file_ok checks inside the threads start from a clean state.
     let strand_out = qc_dir.join(format!("{}.strand.txt", sample.name));
     let rdist_out = qc_dir.join(format!("{}.read_distribution.txt", sample.name));
+
+    // Check per-sub-tool checkpoints — skip tools that are already valid.
+    let skip_infer = is_step_done(&config.output_dir, &sample.name, STEP_INFER);
+    let skip_rdist = is_step_done(&config.output_dir, &sample.name, STEP_RDIST);
+    let skip_genebody = is_step_done(&config.output_dir, &sample.name, STEP_GENEBODY);
+
+    if skip_infer && skip_rdist && skip_genebody {
+        state.add_event(format!("  SKIP  {} — all RSeQC sub-tools already valid", sample.name));
+        // Count skipped sub-tools as done for progress tracking
+        if skip_infer { overall.inc_p3_sub_done(0); }
+        if skip_rdist { overall.inc_p3_sub_done(1); }
+        if skip_genebody { overall.inc_p3_sub_done(2); }
+        return Ok(());
+    }
+
     {
         let rseqc_python = config.rseqc_env.join("bin/python");
-        state.set_active(slot, &sample.name, "infer + read_dist + geneBody_coverage2");
+        let active_label = [
+            if skip_infer { None } else { Some("infer") },
+            if skip_rdist { None } else { Some("read_dist") },
+            if skip_genebody { None } else { Some("geneBody_coverage2") },
+        ].iter().filter_map(|x| *x).collect::<Vec<_>>().join(" + ");
+        state.set_active(slot, &sample.name, &active_label);
 
         let t_start = Instant::now();
 
@@ -1795,6 +2127,10 @@ fn run_rseqc_phase3(
             std::thread::scope(|s| {
                 // infer_experiment.py
                 let t_infer = s.spawn(|| {
+                    if skip_infer {
+                        state.add_event(format!("  SKIP  {} — infer_experiment (checkpoint valid)", sample.name));
+                        return;
+                    }
                     let script = config.rseqc_env.join("bin/infer_experiment.py");
                         let script_str = match script.to_str() {
                             Some(s) => s.to_string(),
@@ -1834,6 +2170,10 @@ fn run_rseqc_phase3(
 
                 // read_distribution.py
                 let t_rdist = s.spawn(|| {
+                    if skip_rdist {
+                        state.add_event(format!("  SKIP  {} — read_distribution (checkpoint valid)", sample.name));
+                        return;
+                    }
                     let script = config.rseqc_env.join("bin/read_distribution.py");
                         let script_str = match script.to_str() {
                             Some(s) => s.to_string(),
@@ -1872,6 +2212,10 @@ fn run_rseqc_phase3(
 
                 // geneBody_coverage2.py (bigwig from Phase 2 is already present)
                 let t_genebody = s.spawn(|| {
+                    if skip_genebody {
+                        state.add_event(format!("  SKIP  {} — geneBody_coverage2 (checkpoint valid)", sample.name));
+                        return;
+                    }
                     let script = config.rseqc_env.join("bin/geneBody_coverage2.py");
                         let script_str = match script.to_str() {
                             Some(s) => s.to_string(),
@@ -1902,64 +2246,95 @@ fn run_rseqc_phase3(
                             Ok(true) => {
                                 state.add_event(format!("  DONE  {} — geneBody_coverage2", sample.name));
 
-                                // Generate ggplot2 PDF plots — required outputs
-                                // included in the genebody SHA256 checkpoint.
+                                // Generate ggplot2 PDF plots via inline R (no .r file artifacts).
+                                // Both are required outputs included in the genebody SHA256 checkpoint.
                                 {
-                                    let genebody_prefix_str = genebody_prefix.to_string();
+                                    let pfx = genebody_prefix.to_string();
+                                    let txt_file = format!("{pfx}.geneBodyCoverage.txt");
                                     let mut pdf_ok = true;
 
                                     // Curves plot
-                                    match create_curves_r_script(&genebody_prefix_str) {
-                                        Ok(_) => {
-                                            let curves_r = format!("{}.geneBodyCoverage.curves.r", genebody_prefix_str);
-                                            let curves_pdf = format!("{}.geneBodyCoverage.curves.pdf", genebody_prefix_str);
-                                            match run_r_script(&curves_r) {
-                                                Ok(_) => {
-                                                    match validate_pdf_created(&curves_pdf) {
-                                                        Ok(_) => state.add_event(format!("  DONE  {} — geneBodyCoverage curves plot", sample.name)),
-                                                        Err(e) => {
-                                                            state.add_event(format!("  FAIL  {} — curves PDF validation: {e}", sample.name));
-                                                            pdf_ok = false;
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) if e == "Cancelled" => {}
-                                                Err(e) => {
-                                                    state.add_event(format!("  FAIL  {} — geneBodyCoverage curves plot: {e}", sample.name));
-                                                    pdf_ok = false;
-                                                }
+                                    let curves_pdf = format!("{pfx}.geneBodyCoverage.curves.pdf");
+                                    let curves_r = format!(
+                                        r#"tryCatch({{
+  if (!require('ggplot2', quietly=TRUE)) stop('ggplot2 package required')
+  data <- read.table('{input}', header=TRUE, sep='\t')
+  if (nrow(data) == 0) stop('Input file is empty')
+  if (!all(c('percentile', 'count') %in% names(data))) stop('Missing required columns')
+  p <- ggplot(data, aes(x=percentile, y=count)) +
+    geom_point(size=2, color='steelblue') +
+    geom_line(color='steelblue', linewidth=0.8) +
+    labs(title='Gene Body Coverage Distribution',
+         x='Gene Body Percentile (5\' to 3\')', y='Average Coverage',
+         subtitle='Coverage across gene body regions') +
+    theme_bw() +
+    theme(plot.title=element_text(size=14, face='bold'),
+          plot.subtitle=element_text(size=11, color='grey40'),
+          axis.title=element_text(size=12), panel.grid.minor=element_blank())
+  ggsave('{output}', p, width=10, height=6, dpi=150)
+}}, error = function(e) {{
+  cat('Error generating curves plot:', conditionMessage(e), '\n', file=stderr())
+  quit(status=1)
+}})
+"#,
+                                        input = txt_file, output = curves_pdf
+                                    );
+                                    match run_inline_r(&curves_r) {
+                                        Ok(_) => match validate_pdf_created(&curves_pdf) {
+                                            Ok(_) => state.add_event(format!("  DONE  {} — geneBodyCoverage curves plot", sample.name)),
+                                            Err(e) => {
+                                                state.add_event(format!("  FAIL  {} — curves PDF validation: {e}", sample.name));
+                                                pdf_ok = false;
                                             }
-                                        }
+                                        },
+                                        Err(e) if e == "Cancelled" => {}
                                         Err(e) => {
-                                            state.add_event(format!("  FAIL  {} — curves R script generation: {e}", sample.name));
+                                            state.add_event(format!("  FAIL  {} — geneBodyCoverage curves plot: {e}", sample.name));
                                             pdf_ok = false;
                                         }
                                     }
 
-                                    // Heatmap plot (independent of curves)
-                                    match create_heatmap_r_script(&genebody_prefix_str) {
-                                        Ok(_) => {
-                                            let heatmap_r = format!("{}.geneBodyCoverage.heatmap.r", genebody_prefix_str);
-                                            let heatmap_pdf = format!("{}.geneBodyCoverage.heatMap.pdf", genebody_prefix_str);
-                                            match run_r_script(&heatmap_r) {
-                                                Ok(_) => {
-                                                    match validate_pdf_created(&heatmap_pdf) {
-                                                        Ok(_) => state.add_event(format!("  DONE  {} — geneBodyCoverage heatmap plot", sample.name)),
-                                                        Err(e) => {
-                                                            state.add_event(format!("  FAIL  {} — heatmap PDF validation: {e}", sample.name));
-                                                            pdf_ok = false;
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) if e == "Cancelled" => {}
-                                                Err(e) => {
-                                                    state.add_event(format!("  FAIL  {} — geneBodyCoverage heatmap plot: {e}", sample.name));
-                                                    pdf_ok = false;
-                                                }
+                                    // Heatmap plot
+                                    let heatmap_pdf = format!("{pfx}.geneBodyCoverage.heatMap.pdf");
+                                    let heatmap_r = format!(
+                                        r#"tryCatch({{
+  if (!require('ggplot2', quietly=TRUE)) stop('ggplot2 package required')
+  data <- read.table('{input}', header=TRUE, sep='\t')
+  if (nrow(data) == 0) stop('Input file is empty')
+  if (!all(c('percentile', 'count') %in% names(data))) stop('Missing required columns')
+  data$norm_count <- (data$count - min(data$count)) / (max(data$count) - min(data$count))
+  p <- ggplot(data, aes(x=percentile, y=1, fill=norm_count)) +
+    geom_tile(height=0.8) +
+    scale_fill_gradient(low='white', high='darkblue', name='Normalized\nCoverage') +
+    scale_x_continuous(breaks=seq(0, 100, 10)) +
+    labs(title='Gene Body Coverage Heatmap',
+         x='Gene Body Percentile (5\' to 3\')', y='',
+         subtitle='Intensity represents relative coverage level') +
+    theme_bw() +
+    theme(plot.title=element_text(size=14, face='bold'),
+          plot.subtitle=element_text(size=11, color='grey40'),
+          axis.title=element_text(size=12), axis.title.y=element_blank(),
+          axis.text.y=element_blank(), axis.ticks.y=element_blank(),
+          panel.grid=element_blank())
+  ggsave('{output}', p, width=12, height=3, dpi=150)
+}}, error = function(e) {{
+  cat('Error generating heatmap plot:', conditionMessage(e), '\n', file=stderr())
+  quit(status=1)
+}})
+"#,
+                                        input = txt_file, output = heatmap_pdf
+                                    );
+                                    match run_inline_r(&heatmap_r) {
+                                        Ok(_) => match validate_pdf_created(&heatmap_pdf) {
+                                            Ok(_) => state.add_event(format!("  DONE  {} — geneBodyCoverage heatmap plot", sample.name)),
+                                            Err(e) => {
+                                                state.add_event(format!("  FAIL  {} — heatmap PDF validation: {e}", sample.name));
+                                                pdf_ok = false;
                                             }
-                                        }
+                                        },
+                                        Err(e) if e == "Cancelled" => {}
                                         Err(e) => {
-                                            state.add_event(format!("  FAIL  {} — heatmap R script generation: {e}", sample.name));
+                                            state.add_event(format!("  FAIL  {} — geneBodyCoverage heatmap plot: {e}", sample.name));
                                             pdf_ok = false;
                                         }
                                     }
@@ -1987,17 +2362,20 @@ fn run_rseqc_phase3(
 
         state.record_duration(t_start.elapsed().as_secs_f64());
 
-        // On cancellation: clean up all partial outputs
+        // On cancellation: clean up only partial outputs from tools that were running
         if is_cancelled() {
-            let _ = fs::remove_file(&strand_out);
-            let _ = fs::remove_file(&rdist_out);
-            for suffix in &[
-                ".geneBodyCoverage.txt", ".geneBodyCoverage_plot.r",
-                ".geneBodyCoverage.pdf", ".geneBodyCoverage.curves.r",
-                ".geneBodyCoverage.curves.pdf", ".geneBodyCoverage.heatmap.r",
-                ".geneBodyCoverage.heatMap.pdf",
-            ] {
-                let _ = fs::remove_file(qc_dir.join(format!("{}{suffix}", sample.name)));
+            if !skip_infer { let _ = fs::remove_file(&strand_out); }
+            if !skip_rdist { let _ = fs::remove_file(&rdist_out); }
+            if !skip_genebody {
+                for suffix in &[
+                    ".geneBodyCoverage.txt",
+                    ".geneBodyCoverage_plot.r",
+                    ".geneBodyCoverage.pdf",
+                    ".geneBodyCoverage.curves.pdf",
+                    ".geneBodyCoverage.heatMap.pdf",
+                ] {
+                    let _ = fs::remove_file(qc_dir.join(format!("{}{suffix}", sample.name)));
+                }
             }
             return Err("Cancelled".to_string());
         }
@@ -2008,44 +2386,57 @@ fn run_rseqc_phase3(
         // sibling outputs are preserved for the next resume.
         let mut failed_tools: Vec<&str> = Vec::new();
 
-        if infer_failed.load(Ordering::SeqCst) {
+        if skip_infer {
+            overall.inc_p3_sub_done(0); // skipped = done for progress
+        } else if infer_failed.load(Ordering::SeqCst) {
             let _ = fs::remove_file(&strand_out);
             remove_step_checkpoint(&config.output_dir, &sample.name, STEP_INFER);
             failed_tools.push("infer_experiment");
+            overall.inc_p3_sub_done(0);
         } else {
             if let Err(e) = write_step_checkpoint(&config.output_dir, &sample.name, STEP_INFER) {
                 state.add_event(format!("  FAIL  {} — infer checkpoint write: {e}", sample.name));
                 failed_tools.push("infer_experiment(checkpoint)");
             }
+            overall.inc_p3_sub_done(0);
         }
 
-        if rdist_failed.load(Ordering::SeqCst) {
+        if skip_rdist {
+            overall.inc_p3_sub_done(1);
+        } else if rdist_failed.load(Ordering::SeqCst) {
             let _ = fs::remove_file(&rdist_out);
             remove_step_checkpoint(&config.output_dir, &sample.name, STEP_RDIST);
             failed_tools.push("read_distribution");
+            overall.inc_p3_sub_done(1);
         } else {
             if let Err(e) = write_step_checkpoint(&config.output_dir, &sample.name, STEP_RDIST) {
                 state.add_event(format!("  FAIL  {} — rdist checkpoint write: {e}", sample.name));
                 failed_tools.push("read_distribution(checkpoint)");
             }
+            overall.inc_p3_sub_done(1);
         }
 
-        if genebody_failed.load(Ordering::SeqCst) {
+        if skip_genebody {
+            overall.inc_p3_sub_done(2);
+        } else if genebody_failed.load(Ordering::SeqCst) {
             for suffix in &[
-                ".geneBodyCoverage.txt", ".geneBodyCoverage_plot.r",
-                ".geneBodyCoverage.pdf", ".geneBodyCoverage.curves.r",
-                ".geneBodyCoverage.curves.pdf", ".geneBodyCoverage.heatmap.r",
+                ".geneBodyCoverage.txt",
+                ".geneBodyCoverage_plot.r",
+                ".geneBodyCoverage.pdf",
+                ".geneBodyCoverage.curves.pdf",
                 ".geneBodyCoverage.heatMap.pdf",
             ] {
                 let _ = fs::remove_file(qc_dir.join(format!("{}{suffix}", sample.name)));
             }
             remove_step_checkpoint(&config.output_dir, &sample.name, STEP_GENEBODY);
             failed_tools.push("geneBody_coverage2");
+            overall.inc_p3_sub_done(2);
         } else {
             if let Err(e) = write_step_checkpoint(&config.output_dir, &sample.name, STEP_GENEBODY) {
                 state.add_event(format!("  FAIL  {} — genebody checkpoint write: {e}", sample.name));
                 failed_tools.push("geneBody_coverage2(checkpoint)");
             }
+            overall.inc_p3_sub_done(2);
         }
 
         if !failed_tools.is_empty() {
@@ -2120,9 +2511,7 @@ fn cleanup_partial_rseqc(output_dir: &Path, sample_name: &str) {
         ".geneBodyCoverage.txt",
         ".geneBodyCoverage_plot.r",
         ".geneBodyCoverage.pdf",
-        ".geneBodyCoverage.curves.r",
         ".geneBodyCoverage.curves.pdf",
-        ".geneBodyCoverage.heatmap.r",
         ".geneBodyCoverage.heatMap.pdf",
     ];
     for suffix in &suffixes {
@@ -2135,467 +2524,105 @@ fn cleanup_partial_rseqc(output_dir: &Path, sample_name: &str) {
     }
 }
 
-// ─── TUI rendering ──────────────────────────────────────────────────────────
+// ─── TUI snapshot builder ────────────────────────────────────────────────────
 
-fn fmt_duration(d: Duration) -> String {
-    let secs = d.as_secs();
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    if h > 0 {
-        format!("{h:02}:{m:02}:{s:02}")
-    } else {
-        format!("{m:02}:{s:02}")
-    }
-}
-
-fn fmt_secs(s: f64) -> String {
-    if s.is_nan() || s.is_infinite() || s < 0.0 {
-        return "??:??".to_string();
-    }
-    // Cap at 99:59:59 (359999 s) — beyond that, display "99:59:59+".
-    // Avoids both the u64::MAX→f64 precision loss and the Duration nanosecond overflow
-    // that occurs when secs_f64 × 1e9 exceeds u64::MAX.
-    if s >= 359_999.0 {
-        return "99:59:59+".to_string();
-    }
-    fmt_duration(Duration::from_secs_f64(s))
-}
-
-// ─── Layout helpers ──────────────────────────────────────────────────────────
-
-fn truncate_to(s: &str, n: usize) -> String {
-    if s.chars().count() > n {
-        s.chars().take(n).collect()
-    } else {
-        s.to_string()
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LayoutMode {
-    Compact,
-    Normal,
-    Wide,
-}
-
-struct LayoutMetrics {
-    overall_bar_w: usize,   // fills terminal: w - 2  (2 indent + 5 for " 100%")
-    sample_bar_w: usize,    // fills terminal on Wide; capped on Compact/Normal
-    max_name: usize,        // name column width, mode-dependent
-    stats_rows: usize,      // 1 (Wide) or 2 (Compact/Normal)
-}
-
-fn compute_layout(w: usize, _h: usize) -> LayoutMetrics {
-    let mode = match w {
-        0..=79 => LayoutMode::Compact,
-        80..=119 => LayoutMode::Normal,
-        _ => LayoutMode::Wide,
-    };
-
-    // Overall bar: "  [bar] 100%"  →  2 + bar + 5 = w  →  bar = w - 7
-    let overall_bar_w = w.saturating_sub(7).max(4);
-
-    // Sample bar: "    [bar] 100%"  →  4 + bar + 5 = w  →  bar = w - 9
-    // Compact: cap 28, Normal: cap 60, Wide: uncapped (fills terminal)
-    let raw = w.saturating_sub(9);
-    let sample_bar_w = match mode {
-        LayoutMode::Compact => raw.min(28).max(4),
-        LayoutMode::Normal => raw.min(60).max(4),
-        LayoutMode::Wide => raw.max(4),
-    };
-
-    // Name column: leave budget for "  S " (4) + "[step_label] " (~14) + "HH:MM:SS / ~HH:MM:SS" (21) = 39
-    let raw_name = w.saturating_sub(39);
-    let max_name = match mode {
-        LayoutMode::Compact => raw_name.min(16).max(6),
-        LayoutMode::Normal => raw_name.min(28).max(8),
-        LayoutMode::Wide => raw_name.min(48).max(10),
-    };
-
-    // Stats: 2 lines on Compact/Normal, 1 line on Wide
-    let stats_rows = if mode == LayoutMode::Wide { 1 } else { 2 };
-
-    LayoutMetrics {
-        overall_bar_w,
-        sample_bar_w,
-        max_name,
-        stats_rows,
-    }
-}
-
-#[allow(unused_assignments)]
-fn render_screen(
-    stdout: &mut io::Stdout,
+#[cfg(feature = "tui")]
+fn build_snapshot(
     state: &ProgressState,
-    parallel_jobs: usize,
+    _parallel_jobs: usize,
     resumed: usize,
-) {
-    let (term_w, term_h) = terminal::size().unwrap_or((80, 24));
-    let w = term_w as usize;
-    let h = term_h as usize;
-
-    let lm = compute_layout(w, h);
-
+) -> RenderSnapshot {
     let elapsed = state.start_time.elapsed();
     let done = state.done_count();
     let total = state.total;
     let completed = state.completed.load(Ordering::Relaxed);
     let skipped = state.skipped.load(Ordering::Relaxed);
     let failed = state.failed.load(Ordering::Relaxed);
-    let remaining = total.saturating_sub(done);
-    let phase = state.phase();
+    let phase_label = state.phase();
     let avg_dur = state.avg_duration();
 
-    let pct = if total > 0 { done.min(total) * 100 / total } else { 0 };
-    let processed = completed;
-    let speed = if elapsed.as_secs() > 0 && processed > 0 {
-        processed as f64 / (elapsed.as_secs_f64() / 60.0)
-    } else {
-        0.0
-    };
-    let eta = if processed > 0 && remaining > 0 {
-        Duration::from_secs_f64(avg_dur * remaining as f64)
-    } else if done > 0 && remaining > 0 {
-        let per = elapsed.as_secs_f64() / done as f64;
-        Duration::from_secs_f64(per * remaining as f64)
-    } else {
-        Duration::ZERO
-    };
-
-    let bar_width = lm.overall_bar_w;
-    let filled = if total > 0 {
-        bar_width * done.min(total) / total
-    } else {
-        0
-    };
-    let empty = bar_width.saturating_sub(filled);
-    let bar_filled: String = "\u{2588}".repeat(filled);
-    let bar_empty: String = "\u{2591}".repeat(empty);
-
-    let active_snapshot: Vec<Option<JobSlot>> = state
+    let jobs: Vec<Option<JobSlotSnapshot>> = state
         .active_jobs
         .lock()
-        .map(|j| j.clone())
+        .map(|j| {
+            j.iter()
+                .map(|slot| {
+                    slot.as_ref().map(|job| JobSlotSnapshot {
+                        sample: job.sample.clone(),
+                        step: job.step.clone(),
+                        elapsed_secs: job.started.elapsed().as_secs_f64(),
+                        pct: job.pct.load(Ordering::Relaxed),
+                    })
+                })
+                .collect()
+        })
         .unwrap_or_default();
-    let active_count = active_snapshot.iter().filter(|s| s.is_some()).count();
 
     let events: Vec<String> = state
         .recent_events
         .lock()
-        .map(|e| e.iter().cloned().collect())
+        .map(|e| {
+            let v: Vec<String> = e.iter().cloned().collect();
+            let start = v.len().saturating_sub(10);
+            v[start..].to_vec()
+        })
         .unwrap_or_default();
 
-    // Move cursor to top-left and clear from there
-    let _ = execute!(
-        stdout,
-        cursor::MoveTo(0, 0),
-        terminal::Clear(ClearType::All)
-    );
-
-    let mut row: u16 = 0;
-    let footer_row = h.saturating_sub(1) as u16;  // Sticky footer at bottom
-
-    // Top separator
-    let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::Cyan));
-    println!("{}", "═".repeat(w));
-    row += 1;
-
-    // Header — Title (centered)
-    let title = concat!("STAR-RSeQC v", env!("CARGO_PKG_VERSION"));
-    let title_chars = title.chars().count();
-    let title_pad_left = w.saturating_sub(title_chars) / 2;
-    let title_pad_right = w.saturating_sub(title_chars).saturating_sub(title_pad_left);
-    let title_line = format!("{}{}{}", " ".repeat(title_pad_left), title, " ".repeat(title_pad_right));
-    let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::White), style::SetAttribute(Attribute::Bold));
-    println!("{}", title_line);
-    row += 1;
-
-    // Subtitle (centered, truncated if needed)
-    let subtitle = "STAR 2-Pass Alignment + RSeQC Quality Control | Paired-End RNA-seq";
-    let sub_display = truncate_to(subtitle, w);
-    let sub_len = sub_display.chars().count();
-    let sub_pad_left = w.saturating_sub(sub_len) / 2;
-    let sub_pad_right = w.saturating_sub(sub_len).saturating_sub(sub_pad_left);
-    let sub_line = format!("{}{}{}", " ".repeat(sub_pad_left), sub_display, " ".repeat(sub_pad_right));
-    let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::DarkGrey));
-    println!("{}", sub_line);
-    row += 1;
-
-    // Separator
-    let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::Cyan));
-    println!("{}", "═".repeat(w));
-    row += 1;
-
-    // Phase indicator
-    let phase_line = format!("  {phase}");
-    let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::Magenta));
-    println!("{}", truncate_to(&phase_line, w));
-    row += 1;
-
-    if resumed > 0 {
-        let resume_line = format!(
-            "  Resumed: {resumed} sample(s) already completed from previous run"
-        );
-        let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::DarkYellow));
-        println!("{}", truncate_to(&resume_line, w));
-        row += 1;
-    }
-
-    // Separator
-    let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::Cyan));
-    println!("{}", "═".repeat(w));
-    row += 1;
-
-    // Overall progress bar label
-    let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::White));
-    println!("  OVERALL PROGRESS");
-    row += 1;
-
-    let _ = execute!(
-        stdout,
-        cursor::MoveTo(0, row),
-        style::SetForegroundColor(Color::Green)
-    );
-    print!("  {bar_filled}");
-    let _ = execute!(stdout, style::SetForegroundColor(Color::DarkGrey));
-    print!("{bar_empty}");
-    let _ = execute!(stdout, style::SetForegroundColor(Color::White));
-    let pct_str = format!(" {:>3}%", pct);
-    print!("{pct_str}");
-    let _ = stdout.flush();
-    row += 1;
-
-    // Calculate estimated completion time
-    let completion_time = if eta.as_secs() > 0 {
-        let now = chrono::Local::now();
-        let duration_secs = eta.as_secs() as i64;
-        let completion = now + chrono::Duration::seconds(duration_secs);
-        completion.format("%H:%M:%S").to_string()
-    } else {
-        "—".to_string()
-    };
-
-    if lm.stats_rows == 2 {
-        // Line A: progress info
-        let s = format!(
-            "  {}/{} done   Elapsed: {}   ETA: {}",
-            done, total, fmt_duration(elapsed), fmt_duration(eta)
-        );
-        let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::White));
-        println!("{}", truncate_to(&s, w));
-        row += 1;
-        // Line B: completion info
-        let s = format!("  Complete: {}   Speed: {:.1}/min", completion_time, speed);
-        let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::White));
-        println!("{}", truncate_to(&s, w));
-        row += 1;
-    } else {
-        let s = format!(
-            "  {}/{} done   Elapsed: {}   ETA: {}   Complete: {}   Speed: {:.1}/min",
-            done, total, fmt_duration(elapsed), fmt_duration(eta), completion_time, speed
-        );
-        let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::White));
-        println!("{}", truncate_to(&s, w));
-        row += 1;
-    }
-
-    let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::Cyan));
-    println!("{}", "═".repeat(w));
-    row += 1;
-
-    // Active jobs section
-    let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::Yellow));
-    println!("  ACTIVE JOBS ({}/{})", active_count, parallel_jobs);
-    row += 1;
-
-    let active_jobs: Vec<(usize, &JobSlot)> = active_snapshot
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| s.as_ref().map(|j| (i, j)))
-        .collect();
-
-    // Guard against very small terminals (e.g. tmux panes): ensure row never exceeds
-    // footer_row so MoveTo coordinates always stay within the terminal.
-    let max_active_rows = if row as usize + 11 + lm.stats_rows < h {
-        (h - row as usize - 11 - lm.stats_rows) / 2
-    } else {
-        0
-    };
-    let spinner_chars = ['|', '/', '-', '\\'];
-    let spin_idx = (elapsed.as_millis() / 250) as usize;
-    let sample_bar_w = lm.sample_bar_w;
-
-    if active_jobs.is_empty() {
-        let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::DarkGrey));
-        println!("  No active jobs");
-        row += 1;
-    }
-
-    for (shown, (i, job)) in active_jobs.iter().enumerate() {
-        if shown >= max_active_rows {
-            let hidden = active_jobs.len().saturating_sub(shown);
-            if hidden > 0 {
-                let more = format!("  ... and {hidden} more active");
-                let _more_len = more.chars().count();
-                let _ = execute!(
-                    stdout,
-                    cursor::MoveTo(0, row),
-                    style::SetForegroundColor(Color::DarkGrey)
-                );
-                print!("{}", more);
-                row += 1;
-            }
-            break;
-        }
-
-        let spin = spinner_chars[(spin_idx + i) % 4];
-        let job_elapsed_secs = job.started.elapsed().as_secs_f64();
-        let job_elapsed_str = fmt_secs(job_elapsed_secs);
-        let max_name = lm.max_name;
-        let sample_len = job.sample.chars().count();
-        let name = if sample_len > max_name {
-            format!("{}...", job.sample.chars().take(max_name.saturating_sub(3)).collect::<String>())
+    // Overall progress
+    let (overall_frac, overall_phase, overall_total_phases, overall_done, overall_total, overall_elapsed, p3_frac) =
+        if let Some(ref overall) = state.overall {
+            let current = overall.current_phase.load(Ordering::Relaxed);
+            let p3f = if current == 3 {
+                Some(overall.p3_weighted_frac())
+            } else {
+                None
+            };
+            (
+                overall.weighted_frac(),
+                current,
+                overall.total_phases,
+                overall.total_done(),
+                overall.total_samples(),
+                overall.start_time.elapsed(),
+                p3f,
+            )
         } else {
-            job.sample.clone()
+            (0.0, 1, 1, 0, 0, elapsed, None)
         };
 
-        // Row 1: spinner + name + step + elapsed
-        let eta_part = if avg_dur > 0.0 {
-            format!("{} / ~{}", job_elapsed_str, fmt_secs(avg_dur))
-        } else {
-            job_elapsed_str
-        };
-        let step_label = format!("[{}]", job.step);
-        let line = format!("  {spin} {:<width$} {} {}", name, step_label, eta_part, width = max_name);
-        let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::White));
-        println!("{}", truncate_to(&line, w));
-        row += 1;
-
-        // Row 2: per-sample progress bar
-        let _ = execute!(stdout, cursor::MoveTo(0, row));
-        if avg_dur > 0.0 {
-            let frac = (job_elapsed_secs / avg_dur).min(1.0);
-            let s_filled = (sample_bar_w as f64 * frac) as usize;
-            let s_empty = sample_bar_w.saturating_sub(s_filled);
-            let _ = execute!(stdout, style::SetForegroundColor(Color::Yellow));
-            print!("    {}", "\u{2588}".repeat(s_filled));
-            let _ = execute!(stdout, style::SetForegroundColor(Color::DarkGrey));
-            print!("{}", "\u{2591}".repeat(s_empty));
-            let _ = execute!(stdout, style::SetForegroundColor(Color::White));
-            let s_pct = format!(" {:>3}%", (frac * 100.0) as usize);
-            print!("{s_pct}");
-        } else {
-            // Indeterminate: pulse animation
-            let pulse_pos = (spin_idx + i * 3) % (sample_bar_w + 4);
-            print!("    ");
-            for p in 0..sample_bar_w {
-                if p >= pulse_pos.saturating_sub(2) && p <= pulse_pos {
-                    let _ = execute!(stdout, style::SetForegroundColor(Color::Yellow));
-                    print!("\u{2588}");
-                } else {
-                    let _ = execute!(stdout, style::SetForegroundColor(Color::DarkGrey));
-                    print!("\u{2591}");
-                }
-            }
-        }
-        let _ = stdout.flush();
-        row += 1;
+    RenderSnapshot {
+        done,
+        total,
+        completed,
+        skipped,
+        failed,
+        phase_label,
+        jobs,
+        recent_events: events,
+        elapsed,
+        avg_dur,
+        overall_frac,
+        overall_phase,
+        overall_total_phases,
+        overall_done,
+        overall_total,
+        overall_elapsed,
+        p3_frac,
+        cancelled: is_cancelled(),
+        resumed,
     }
-
-    let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::Cyan));
-    println!("{}", "═".repeat(w));
-    row += 1;
-
-    // Counters
-    let _ = execute!(stdout, cursor::MoveTo(0, row));
-    let _ = execute!(stdout, style::SetForegroundColor(Color::Green));
-    print!("  Completed: {completed}");
-    let _ = execute!(stdout, style::SetForegroundColor(Color::Yellow));
-    print!("   Skipped: {skipped}");
-    let _ = execute!(stdout, style::SetForegroundColor(Color::Red));
-    print!("   Failed: {failed}");
-    let _ = execute!(stdout, style::SetForegroundColor(Color::White));
-    print!("   Remaining: {remaining}");
-    let _ = stdout.flush();
-    row += 1;
-
-    let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::Cyan));
-    println!("{}", "═".repeat(w));
-    row += 1;
-
-    // Recent activity
-    let _ = execute!(stdout, cursor::MoveTo(0, row), style::SetForegroundColor(Color::Magenta));
-    println!("  RECENT ACTIVITY");
-    row += 1;
-
-    // Leave room for footer (2 rows: separator + footer)
-    let max_event_rows = (footer_row as usize).saturating_sub(row as usize + 2).max(0);
-    let start = events.len().saturating_sub(max_event_rows);
-    for event_line in &events[start..] {
-        let _ = execute!(stdout, cursor::MoveTo(0, row));
-        let ev = truncate_to(event_line, w);
-        if ev.contains("DONE") {
-            let _ = execute!(stdout, style::SetForegroundColor(Color::Green));
-        } else if ev.contains("SKIP") || ev.contains("RESUME") {
-            let _ = execute!(stdout, style::SetForegroundColor(Color::Yellow));
-        } else if ev.contains("FAIL") {
-            let _ = execute!(stdout, style::SetForegroundColor(Color::Red));
-        } else if ev.contains("STOP") {
-            let _ = execute!(stdout, style::SetForegroundColor(Color::DarkRed));
-        } else if ev.contains("INFO") {
-            let _ = execute!(stdout, style::SetForegroundColor(Color::Cyan));
-        } else {
-            let _ = execute!(stdout, style::SetForegroundColor(Color::White));
-        }
-        print!("{ev}");
-        let _ = stdout.flush();
-        row += 1;
-    }
-
-    // === FOOTER (STICKY AT BOTTOM) ===
-    // Footer separator (above footer)
-    let _ = execute!(stdout, cursor::MoveTo(0, footer_row.saturating_sub(1)), style::SetForegroundColor(Color::Cyan));
-    println!("{}", "═".repeat(w));
-
-    // Footer info line (always at very bottom)
-    let cancel_hint = if is_cancelled() {
-        "CANCELLING..."
-    } else {
-        "Ctrl+C to cancel"
-    };
-    let timestamp = format!("Updated: {}", Local::now().format("%H:%M:%S"));
-    let cancel_hint_len = cancel_hint.chars().count();
-    let timestamp_len = timestamp.chars().count();
-    let footer_pad = w
-        .saturating_sub(cancel_hint_len)
-        .saturating_sub(timestamp_len)
-        .saturating_sub(2);
-
-    let _ = execute!(stdout, cursor::MoveTo(0, footer_row));
-    if is_cancelled() {
-        let _ = execute!(stdout, style::SetForegroundColor(Color::Red));
-    } else {
-        let _ = execute!(stdout, style::SetForegroundColor(Color::DarkGrey));
-    }
-    print!("  {}", cancel_hint);
-    let _ = execute!(stdout, style::SetForegroundColor(Color::DarkGrey));
-    print!("{}", " ".repeat(footer_pad));
-    print!("{}", timestamp);
-    let _ = stdout.flush();
-
-    let _ = execute!(stdout, style::ResetColor);
-    let _ = stdout.flush();
 }
 
 // ─── Display thread ──────────────────────────────────────────────────────────
 
+#[cfg(feature = "tui")]
 struct DisplayThread {
     flag: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
     is_tty: bool,
 }
 
+#[cfg(feature = "tui")]
 impl DisplayThread {
     fn start(state: Arc<ProgressState>, parallel_jobs: usize, resumed: usize, is_tty: bool) -> Self {
         let flag = Arc::new(AtomicBool::new(false));
@@ -2603,30 +2630,70 @@ impl DisplayThread {
 
         let handle = std::thread::spawn(move || {
             let mut out = io::stdout();
+            let mut last_nontty_print = Instant::now();
             loop {
-                // Only write ANSI/TUI output when running on a real terminal.
-                // On a pipe or log file we skip rendering to avoid garbage output,
-                // but still poll for Ctrl+C events (harmless no-op on non-TTY).
                 if is_tty {
-                    render_screen(&mut out, &state, parallel_jobs, resumed);
-                }
-
-                if event::poll(REFRESH_INTERVAL).unwrap_or(false) {
-                    if let Ok(event::Event::Key(key)) = event::read() {
-                        if key.code == event::KeyCode::Char('c')
-                            && key.modifiers.contains(event::KeyModifiers::CONTROL)
-                        {
-                            CANCELLED.store(true, Ordering::SeqCst);
+                    // Handle resize and key events before rendering
+                    let mut force_clear = false;
+                    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                        match event::read() {
+                            Ok(event::Event::Key(key)) => {
+                                if key.code == event::KeyCode::Char('c')
+                                    && key.modifiers.contains(event::KeyModifiers::CONTROL)
+                                {
+                                    CANCELLED.store(true, Ordering::SeqCst);
+                                } else if matches!(
+                                    key.code,
+                                    event::KeyCode::Char('q') | event::KeyCode::Char('Q')
+                                ) {
+                                    CANCELLED.store(true, Ordering::SeqCst);
+                                }
+                            }
+                            Ok(event::Event::Resize(_, _)) => {
+                                force_clear = true;
+                            }
+                            _ => {}
                         }
                     }
+
+                    if force_clear {
+                        // Queued into buffer — render() will do the actual flush
+                        let mut clr = Vec::new();
+                        let _ = crossterm::queue!(clr,
+                            terminal::Clear(terminal::ClearType::All),
+                            cursor::MoveTo(0, 0)
+                        );
+                        let _ = out.write_all(&clr);
+                    }
+                    let snap = build_snapshot(&state, parallel_jobs, resumed);
+                    let blink_on = (snap.elapsed.as_millis() / 500) % 2 == 0;
+                    tui::render(&mut out, &snap, parallel_jobs, blink_on);
+                } else if last_nontty_print.elapsed() >= Duration::from_secs(30) {
+                    last_nontty_print = Instant::now();
+                    let snap = build_snapshot(&state, parallel_jobs, resumed);
+                    let elapsed_str = fmt_duration(snap.elapsed);
+                    let active: Vec<_> = snap.jobs.iter().filter_map(|s| s.as_ref()).collect();
+                    let active_names: Vec<_> = active.iter().map(|j| j.sample.as_str()).collect();
+                    eprintln!(
+                        "[{}] {} — {}/{} done, {} failed | active: {}",
+                        elapsed_str,
+                        snap.phase_label,
+                        snap.completed, snap.total,
+                        snap.failed,
+                        if active_names.is_empty() { "none".to_string() } else { active_names.join(", ") },
+                    );
                 }
 
                 if display_flag.load(Ordering::SeqCst) || is_cancelled() {
                     if is_tty {
-                        render_screen(&mut out, &state, parallel_jobs, resumed);
+                        let snap = build_snapshot(&state, parallel_jobs, resumed);
+                        let blink_on = (snap.elapsed.as_millis() / 500) % 2 == 0;
+                        tui::render(&mut out, &snap, parallel_jobs, blink_on);
                     }
                     break;
                 }
+
+                std::thread::sleep(REFRESH_INTERVAL);
             }
         });
 
@@ -2650,10 +2717,55 @@ impl DisplayThread {
     }
 }
 
+#[cfg(feature = "tui")]
 impl Drop for DisplayThread {
     fn drop(&mut self) {
         if self.handle.is_some() {
             self.stop();
+        }
+    }
+}
+
+#[cfg(not(feature = "tui"))]
+struct DisplayThread {
+    flag: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(feature = "tui"))]
+impl DisplayThread {
+    fn start(state: Arc<ProgressState>, _parallel_jobs: usize, _resumed: usize, _is_tty: bool) -> Self {
+        let flag = Arc::new(AtomicBool::new(false));
+        let display_flag = Arc::clone(&flag);
+        let handle = std::thread::spawn(move || {
+            loop {
+                if display_flag.load(Ordering::SeqCst) || is_cancelled() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(30));
+                if display_flag.load(Ordering::SeqCst) || is_cancelled() {
+                    break;
+                }
+                let done = state.completed.load(Ordering::Relaxed);
+                let failed = state.failed.load(Ordering::Relaxed);
+                let total = state.total;
+                let elapsed = fmt_duration(state.start_time.elapsed());
+                let phase = state.phase_label.lock()
+                    .map(|l| l.clone())
+                    .unwrap_or_else(|e| e.into_inner().clone());
+                eprintln!(
+                    "[{}] {} — {}/{} done, {} failed",
+                    elapsed, phase, done, total, failed,
+                );
+            }
+        });
+        Self { flag, handle: Some(handle) }
+    }
+
+    fn stop(&mut self) {
+        self.flag.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
         }
     }
 }
@@ -3020,19 +3132,19 @@ fn write_run_info(
 
 fn main() -> ExitCode {
     // Install a panic hook that restores terminal state before printing the panic message.
-    // Without this, a panic while the TUI is active leaves the user's terminal in raw mode
-    // with the alternate screen active (invisible cursor, no echo, garbled input).
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        // Best-effort terminal restoration — ignore errors.
-        let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(
-            io::stdout(),
-            crossterm::cursor::Show,
-            crossterm::terminal::LeaveAlternateScreen
-        );
-        default_hook(info);
-    }));
+    #[cfg(feature = "tui")]
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = crossterm::terminal::disable_raw_mode();
+            let _ = crossterm::execute!(
+                io::stdout(),
+                crossterm::cursor::Show,
+                crossterm::terminal::LeaveAlternateScreen
+            );
+            default_hook(info);
+        }));
+    }
 
     let mut config = match parse_args() {
         Ok(c) => c,
@@ -3093,25 +3205,55 @@ fn main() -> ExitCode {
         }
         bed.clone()
     } else {
-        let auto_bed = config.output_dir.join("annotation.bed12");
-        if auto_bed.exists() {
-            eprintln!("Reusing cached BED12: {}", auto_bed.display());
+        // 1. Check default BED12 in genome dir
+        let default_bed = PathBuf::from(BED12_FILE);
+        // 2. Check next to GTF
+        let gtf_bed = config.gtf.with_extension("bed12");
+        // 3. Check in genome dir as annotation.bed12
+        let genome_bed = config.genome_dir.join("annotation.bed12");
+        // 4. Fallback to output dir
+        let output_bed = config.output_dir.join("annotation.bed12");
+
+        if default_bed.exists() {
+            eprintln!("Using BED12: {}", default_bed.display());
+            default_bed
+        } else if gtf_bed.exists() {
+            eprintln!("Using BED12: {}", gtf_bed.display());
+            gtf_bed
+        } else if genome_bed.exists() {
+            eprintln!("Using BED12: {}", genome_bed.display());
+            genome_bed
+        } else if output_bed.exists() {
+            eprintln!("Reusing cached BED12: {}", output_bed.display());
+            output_bed
         } else {
+            // Auto-generate as last resort
             let gtf_bytes = fs::metadata(&config.gtf).map(|m| m.len()).unwrap_or(0);
             eprintln!("Converting GTF → BED12 ({:.1} GB)...", gtf_bytes as f64 / 1e9);
             if gtf_bytes > 1_500_000_000 {
                 eprintln!("  NOTE: Large GTF — conversion will use 2–4 GB RAM. \
                     Use --bed to supply a pre-converted BED12 and skip this step.");
             }
-            match gtf_to_bed12(&config.gtf, &auto_bed) {
-                Ok(n) => eprintln!("BED12: {} transcripts written.", n),
+            // Try writing next to GTF, fallback to output dir
+            let target = if gtf_bed.parent().map(|p| {
+                let test = p.join(".bed12_write_test");
+                let ok = fs::write(&test, b"").is_ok();
+                let _ = fs::remove_file(&test);
+                ok
+            }).unwrap_or(false) {
+                gtf_bed
+            } else {
+                output_bed
+            };
+            match gtf_to_bed12(&config.gtf, &target) {
+                Ok(n) => eprintln!("BED12: {} transcripts written to {}", n, target.display()),
                 Err(e) => {
                     eprintln!("GTF→BED12 failed: {e}");
                     return ExitCode::FAILURE;
                 }
             }
+            target
         }
-        auto_bed
     };
 
     // ── Reference integrity check — warn if genome params are unreadable ──
@@ -3133,6 +3275,7 @@ fn main() -> ExitCode {
     );
 
     let mut already_done: usize = 0;
+    let mut resumed_names: Vec<String> = Vec::new();
     let mut output_changed: usize = 0;
     let mut star_to_process: Vec<&Sample> = Vec::new();
     let mut deeptools_to_process: Vec<&Sample> = Vec::new();
@@ -3149,6 +3292,7 @@ fn main() -> ExitCode {
         match status {
             ResumeStatus::AllDone => {
                 already_done += 1;
+                resumed_names.push(s.name.clone());
             }
             ResumeStatus::Phase1Changed => {
                 if config.skip_alignment {
@@ -3183,8 +3327,34 @@ fn main() -> ExitCode {
                 rseqc_to_process.push(s);
             }
             ResumeStatus::Phase3Changed => {
-                eprintln!("  Phase 3 CHANGED: {} — cleaning partial QC outputs, will re-run RSeQC only", s.name);
-                cleanup_partial_rseqc(&config.output_dir, &s.name);
+                // Only clean sub-tools whose checkpoints are invalid — preserve valid ones.
+                let infer_ok = is_step_done(&config.output_dir, &s.name, STEP_INFER);
+                let rdist_ok = is_step_done(&config.output_dir, &s.name, STEP_RDIST);
+                let genebody_ok = is_step_done(&config.output_dir, &s.name, STEP_GENEBODY);
+                let mut changed_parts = Vec::new();
+                if !infer_ok {
+                    let _ = fs::remove_file(config.output_dir.join("qc").join(format!("{}.strand.txt", s.name)));
+                    remove_step_checkpoint(&config.output_dir, &s.name, STEP_INFER);
+                    changed_parts.push("infer");
+                }
+                if !rdist_ok {
+                    let _ = fs::remove_file(config.output_dir.join("qc").join(format!("{}.read_distribution.txt", s.name)));
+                    remove_step_checkpoint(&config.output_dir, &s.name, STEP_RDIST);
+                    changed_parts.push("rdist");
+                }
+                if !genebody_ok {
+                    let qc_dir = config.output_dir.join("qc");
+                    for suffix in &[
+                        ".geneBodyCoverage.txt", ".geneBodyCoverage_plot.r",
+                        ".geneBodyCoverage.pdf", ".geneBodyCoverage.curves.pdf",
+                        ".geneBodyCoverage.heatMap.pdf",
+                    ] {
+                        let _ = fs::remove_file(qc_dir.join(format!("{}{suffix}", s.name)));
+                    }
+                    remove_step_checkpoint(&config.output_dir, &s.name, STEP_GENEBODY);
+                    changed_parts.push("genebody");
+                }
+                eprintln!("  Phase 3 CHANGED: {} — re-running: {}", s.name, changed_parts.join(", "));
                 output_changed += 1;
                 rseqc_to_process.push(s);
             }
@@ -3322,6 +3492,9 @@ fn main() -> ExitCode {
     let parallel_deeptools_jobs = config.parallel_deeptools_jobs;
     let pipeline_start = Instant::now();
 
+    // Overall progress shared across all phases (weights: 45% STAR, 25% deeptools, 30% RSeQC)
+    let overall = Arc::new(OverallProgress::new(3));
+
     let mut stdout = io::stdout();
     let is_tty = stdout.is_tty();
 
@@ -3339,13 +3512,20 @@ fn main() -> ExitCode {
             "Phase 1/3 — STAR alignment ({} samples)",
             star_to_process.len()
         );
+        overall.current_phase.store(1, Ordering::Relaxed);
+        overall.set_phase_total(0, star_to_process.len());
         let state1 = Arc::new(ProgressState::new(
             star_to_process.len(),
             parallel_star_jobs,
             &phase1_label,
+            Some(Arc::clone(&overall)),
         ));
         state1.skipped.store(already_done, Ordering::Relaxed);
+        for name in &resumed_names {
+            state1.add_event(format!("  SKIP  {} — SHA256 verified (resumed)", name));
+        }
 
+        #[cfg(feature = "tui")]
         if is_tty {
             let _ = execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide);
             let _ = terminal::enable_raw_mode();
@@ -3371,10 +3551,12 @@ fn main() -> ExitCode {
                     match write_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_STAR) {
                         Ok(_) => {
                             state1.completed.fetch_add(1, Ordering::Relaxed);
+                            overall.inc_phase_done(0);
                         }
                         Err(e) => {
                             state1.add_event(format!("  FAIL  {} — checkpoint write failed (disk full?): {e}", sample.name));
                             state1.failed.fetch_add(1, Ordering::Relaxed);
+                            overall.inc_phase_done(0);
                         }
                     }
                 }
@@ -3384,6 +3566,7 @@ fn main() -> ExitCode {
                 Err(e) => {
                     // STAR failed — no checkpoint written (step stays incomplete)
                     state1.failed.fetch_add(1, Ordering::Relaxed);
+                    overall.inc_phase_done(0);
                     state1.add_event(format!("  FAIL  {} — {}", sample.name, e));
                 }
             }
@@ -3440,12 +3623,16 @@ fn main() -> ExitCode {
             "Phase 2/3 — deeptools bamCoverage ({} samples)",
             deeptools_to_process_phase2.len()
         );
+        overall.current_phase.store(2, Ordering::Relaxed);
+        overall.set_phase_total(1, deeptools_to_process_phase2.len());
         let state2 = Arc::new(ProgressState::new(
             deeptools_to_process_phase2.len(),
             parallel_deeptools_jobs,
             &phase2_label,
+            Some(Arc::clone(&overall)),
         ));
 
+        #[cfg(feature = "tui")]
         if is_tty {
             let _ = execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide);
             let _ = terminal::enable_raw_mode();
@@ -3468,16 +3655,19 @@ fn main() -> ExitCode {
                     match write_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_DEEPTOOLS) {
                         Ok(_) => {
                             state2.completed.fetch_add(1, Ordering::Relaxed);
+                            overall.inc_phase_done(1);
                         }
                         Err(e) => {
                             state2.add_event(format!("  FAIL  {} — checkpoint write failed (disk full?): {e}", sample.name));
                             state2.failed.fetch_add(1, Ordering::Relaxed);
+                            overall.inc_phase_done(1);
                         }
                     }
                 }
                 Err(e) if e != "Cancelled" => {
                     // deeptools failed — no checkpoint written; STAR checkpoint is preserved
                     state2.failed.fetch_add(1, Ordering::Relaxed);
+                    overall.inc_phase_done(1);
                 }
                 _ => {}
             }
@@ -3536,12 +3726,21 @@ fn main() -> ExitCode {
             "Phase 3/3 — RSeQC (infer + read_dist + geneBody) ({} samples)",
             rseqc_to_process_phase3.len()
         );
+        overall.current_phase.store(3, Ordering::Relaxed);
+        overall.set_phase_total(2, rseqc_to_process_phase3.len());
+        // Set sub-phase totals: each sample needs all 3 sub-tools
+        let p3_count = rseqc_to_process_phase3.len();
+        overall.set_p3_sub_total(0, p3_count); // infer
+        overall.set_p3_sub_total(1, p3_count); // rdist
+        overall.set_p3_sub_total(2, p3_count); // genebody
         let state3 = Arc::new(ProgressState::new(
             rseqc_to_process_phase3.len(),
             parallel_rseqc_jobs,
             &phase3_label,
+            Some(Arc::clone(&overall)),
         ));
 
+        #[cfg(feature = "tui")]
         if is_tty {
             let _ = execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide);
             let _ = terminal::enable_raw_mode();
@@ -3550,16 +3749,18 @@ fn main() -> ExitCode {
         let mut display3 = DisplayThread::start(Arc::clone(&state3), parallel_rseqc_jobs, 0, is_tty);
 
         let _ = run_work_queue(&rseqc_to_process_phase3, parallel_rseqc_jobs, &state3, |sample, slot| {
-            let result = run_rseqc_phase3(sample, config_ref, bed_ref, &state3, slot);
+            let result = run_rseqc_phase3(sample, config_ref, bed_ref, &state3, slot, &overall);
             match &result {
                 Ok(()) => {
                     // Checkpoints already written inside run_rseqc_phase3 per sub-tool
                     state3.completed.fetch_add(1, Ordering::Relaxed);
+                    overall.inc_phase_done(2);
                 }
                 Err(e) if e != "Cancelled" => {
                     // Partial checkpoints written inside run_rseqc_phase3 for tools
                     // that succeeded; failed tools had their outputs + checkpoints cleaned.
                     state3.failed.fetch_add(1, Ordering::Relaxed);
+                    overall.inc_phase_done(2);
                 }
                 _ => {}
             }
@@ -3592,98 +3793,222 @@ fn main() -> ExitCode {
     write_summary_files(&config.output_dir, &all_samples, was_cancelled, &run_timestamp);
 
     // ── Final summary ──
-    println!();
-    println!("  \u{2554}{}\u{2557}", "\u{2550}".repeat(52));
-    if was_cancelled {
-        println!(
-            "  \u{2551}         STAR-RSeQC  -  Cancelled by user           \u{2551}"
-        );
-    } else {
-        println!(
-            "  \u{2551}           STAR-RSeQC  -  Run Complete              \u{2551}"
-        );
-    }
-    println!("  \u{2560}{}\u{2563}", "\u{2550}".repeat(52));
-    println!("  \u{2551}  Total samples:      {:<29}\u{2551}", total);
-    println!(
-        "  \u{2551}  Phase 1 (STAR) complete:     {:<19}\u{2551}",
-        phase1_completed
-    );
-    println!(
-        "  \u{2551}  Phase 1 (STAR) failed:       {:<19}\u{2551}",
-        phase1_failed
-    );
-    println!(
-        "  \u{2551}  Phase 2 (deeptools) complete:{:<19}\u{2551}",
-        phase2_completed
-    );
-    println!(
-        "  \u{2551}  Phase 2 (deeptools) failed:  {:<19}\u{2551}",
-        phase2_failed_final
-    );
-    println!(
-        "  \u{2551}  Phase 3 (RSeQC) complete:    {:<19}\u{2551}",
-        phase3_completed
-    );
-    println!(
-        "  \u{2551}  Phase 3 (RSeQC) failed:      {:<19}\u{2551}",
-        phase3_failed_final
-    );
-    if already_done > 0 {
-        println!(
-            "  \u{2551}  Resumed (SHA256 OK): {:<28}\u{2551}",
-            already_done
-        );
-    }
-    println!("  \u{2551}  Total elapsed:      {:<29}\u{2551}", elapsed_str);
-    println!("  \u{2551}  Threads/sample:     {:<29}\u{2551}",
-        if config.resources_auto { format!("{} (auto)", config.threads_per_sample) }
-        else { config.threads_per_sample.to_string() });
-    println!("  \u{2551}  STAR jobs:          {:<29}\u{2551}",
-        if config.resources_auto { format!("{} (auto)", parallel_star_jobs) }
-        else { parallel_star_jobs.to_string() });
-    println!("  \u{2551}  deeptools jobs:     {:<29}\u{2551}",
-        if config.resources_auto { format!("{} (auto)", parallel_deeptools_jobs) }
-        else { parallel_deeptools_jobs.to_string() });
-    println!("  \u{2551}  RSeQC jobs:         {:<29}\u{2551}",
-        if config.resources_auto { format!("{} (auto)", parallel_rseqc_jobs) }
-        else { parallel_rseqc_jobs.to_string() });
-    println!("  \u{2560}{}\u{2563}", "\u{2550}".repeat(52));
-    println!(
-        "  \u{2551}  Output : {:<41}\u{2551}",
-        config.output_dir.display()
-    );
-    println!(
-        "  \u{2551}  BAMs   : {:<41}\u{2551}",
-        config.output_dir.join("star").display()
-    );
-    println!(
-        "  \u{2551}  QC     : {:<41}\u{2551}",
-        config.output_dir.join("qc").display()
-    );
-    println!(
-        "  \u{2551}  Logs   : {:<41}\u{2551}",
-        config.output_dir.join("logs").display()
-    );
-    println!("  \u{255A}{}\u{255D}", "\u{2550}".repeat(52));
-    println!();
-
     let total_failures = phase1_failed + phase2_failed_final + phase3_failed_final;
-    if total_failures > 0 {
-        println!("  {} sample(s) failed during processing.", total_failures);
-        println!();
+
+    // ── Post-run summary hold (Phase 4): show final frame and wait ──
+    #[cfg(feature = "tui")]
+    let mut out = io::stdout();
+    #[cfg(feature = "tui")]
+    if is_tty {
+        // Enter alternate screen for final frame
+        let _ = execute!(out, terminal::EnterAlternateScreen, cursor::Hide);
+        let _ = terminal::enable_raw_mode();
+
+        let message = if was_cancelled {
+            "Run cancelled. Re-run to resume."
+        } else if total_failures > 0 {
+            "Completed with errors. Re-run to retry."
+        } else {
+            "All samples processed successfully."
+        };
+        tui::render_final_frame(&mut out, message);
+
+        // Wait for keypress or 10 seconds
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if event::poll(remaining.min(Duration::from_millis(100))).unwrap_or(false) {
+                if let Ok(event::Event::Key(_)) = event::read() {
+                    break;
+                }
+            }
+        }
+
+        let _ = terminal::disable_raw_mode();
+        let _ = execute!(out, cursor::Show, terminal::LeaveAlternateScreen);
     }
 
-    if was_cancelled {
-        println!("  Run was cancelled. Re-run the same command to resume.");
+    // ── Styled summary (feature-gated) ──
+    #[cfg(feature = "tui")]
+    {
+        let title_color = if was_cancelled {
+            Color::Red
+        } else if total_failures > 0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        let sep_color = Color::Cyan;
+        let label_color = Color::White;
+        let ok_color = Color::Green;
+        let fail_color = Color::Red;
+        let path_color = Color::Cyan;
+
+        let (term_w, term_h) = terminal::size().unwrap_or((80, 24));
+        let final_lm = compute_layout(term_w as usize, term_h as usize);
+        let final_bar_w = final_lm.overall_bar_w;
+
+        let o_frac = overall.weighted_frac();
+        let o_pct = (o_frac * 100.0) as usize;
+        let o_filled = (final_bar_w as f64 * o_frac) as usize;
+        let o_empty = final_bar_w.saturating_sub(o_filled);
+        let o_elapsed = overall.start_time.elapsed();
+        let o_done = overall.total_done();
+        let o_total = overall.total_samples();
+
         println!();
-    } else if total_failures > 0 {
-        println!("  Some samples failed. Re-run to retry failed samples.");
+        let _ = execute!(out, style::SetForegroundColor(sep_color));
+        println!("  {}", "═".repeat(term_w as usize));
+
+        let _ = execute!(out, style::SetForegroundColor(label_color));
+        println!("  OVERALL PIPELINE  (complete)");
+        let _ = write!(out, "  ");
+        print_gradient_bar(&mut out, o_filled, o_empty, (180, 0, 180), (144, 238, 144), false, (255, 255, 0));
+        let _ = execute!(out, style::SetForegroundColor(label_color));
+        println!(" {:>3}%", o_pct);
+        let _ = execute!(out, style::SetForegroundColor(Color::DarkGrey));
+        println!("  {}/{} done   Elapsed: {}", o_done, o_total, fmt_duration(o_elapsed));
+
+        let _ = execute!(out, style::SetForegroundColor(sep_color));
+        println!("  {}", "─".repeat(term_w as usize));
+
+        let _ = execute!(out, style::SetForegroundColor(label_color));
+        println!("  PHASE PROGRESS  (all phases complete)");
+        let _ = write!(out, "  ");
+        print_gradient_bar(&mut out, final_bar_w, 0, (180, 0, 180), (144, 238, 144), false, (255, 255, 0));
+        let _ = execute!(out, style::SetForegroundColor(label_color));
+        println!(" 100%");
+
+        let _ = execute!(out, style::SetForegroundColor(sep_color));
+        println!("  {}", "═".repeat(term_w as usize));
+
+        let _ = execute!(out, style::SetForegroundColor(title_color), style::SetAttribute(Attribute::Bold));
+        if was_cancelled {
+            println!("         STAR-RSeQC  —  Cancelled by user");
+        } else if total_failures > 0 {
+            println!("         STAR-RSeQC  —  Completed with errors");
+        } else {
+            println!("         STAR-RSeQC  —  Run Complete");
+        }
+        let _ = execute!(out, style::SetAttribute(Attribute::Reset));
         println!();
-    } else if config.clean_sam {
-        let cleaned = cleanup_sam_files(&config.output_dir, &all_samples);
-        println!("  --clean-sam: deleted {} chimeric SAM file(s).", cleaned);
+
+        let _ = execute!(out, style::SetForegroundColor(label_color));
+        println!("    Total samples:                {}", total);
         println!();
+
+        for (phase_name, completed, failed) in [
+            ("Phase 1 (STAR)", phase1_completed, phase1_failed),
+            ("Phase 2 (deeptools)", phase2_completed, phase2_failed_final),
+            ("Phase 3 (RSeQC)", phase3_completed, phase3_failed_final),
+        ] {
+            let _ = execute!(out, style::SetForegroundColor(label_color));
+            let _ = write!(out, "    {:<30}", phase_name);
+            let _ = execute!(out, style::SetForegroundColor(ok_color));
+            let _ = write!(out, "{} done", completed);
+            if failed > 0 {
+                let _ = execute!(out, style::SetForegroundColor(fail_color));
+                let _ = write!(out, "   {} failed", failed);
+            }
+            let _ = out.flush();
+            println!();
+        }
+
+        if already_done > 0 {
+            let _ = execute!(out, style::SetForegroundColor(Color::DarkYellow));
+            println!("    Resumed (SHA256 OK):          {}", already_done);
+        }
+        println!();
+
+        let _ = execute!(out, style::SetForegroundColor(sep_color));
+        println!("  {}", "─".repeat(56));
+        println!();
+
+        let _ = execute!(out, style::SetForegroundColor(label_color));
+        println!("    Total elapsed:                {}", elapsed_str);
+        let threads_str = if config.resources_auto { format!("{} (auto)", config.threads_per_sample) }
+            else { config.threads_per_sample.to_string() };
+        let star_str = if config.resources_auto { format!("{} (auto)", parallel_star_jobs) }
+            else { parallel_star_jobs.to_string() };
+        let dt_str = if config.resources_auto { format!("{} (auto)", parallel_deeptools_jobs) }
+            else { parallel_deeptools_jobs.to_string() };
+        let rseqc_str = if config.resources_auto { format!("{} (auto)", parallel_rseqc_jobs) }
+            else { parallel_rseqc_jobs.to_string() };
+        println!("    Threads/sample:               {}", threads_str);
+        println!("    STAR jobs:                    {}", star_str);
+        println!("    deeptools jobs:               {}", dt_str);
+        println!("    RSeQC jobs:                   {}", rseqc_str);
+        println!();
+
+        let _ = execute!(out, style::SetForegroundColor(sep_color));
+        println!("  {}", "─".repeat(56));
+        println!();
+
+        let _ = execute!(out, style::SetForegroundColor(path_color));
+        println!("    Output : {}", config.output_dir.display());
+        println!("    BAMs   : {}", config.output_dir.join("star").display());
+        println!("    QC     : {}", config.output_dir.join("qc").display());
+        println!("    Logs   : {}", config.output_dir.join("logs").display());
+        println!();
+
+        let _ = execute!(out, style::SetForegroundColor(sep_color));
+        println!("  {}", "═".repeat(56));
+        let _ = execute!(out, style::SetAttribute(Attribute::Reset));
+        println!();
+
+        if total_failures > 0 {
+            let _ = execute!(out, style::SetForegroundColor(fail_color));
+            println!("  {} sample(s) failed during processing.", total_failures);
+            let _ = execute!(out, style::SetAttribute(Attribute::Reset));
+            println!();
+        }
+
+        if was_cancelled {
+            let _ = execute!(out, style::SetForegroundColor(Color::Yellow));
+            println!("  Run was cancelled. Re-run the same command to resume.");
+            let _ = execute!(out, style::SetAttribute(Attribute::Reset));
+            println!();
+        } else if total_failures > 0 {
+            let _ = execute!(out, style::SetForegroundColor(Color::Yellow));
+            println!("  Some samples failed. Re-run to retry failed samples.");
+            let _ = execute!(out, style::SetAttribute(Attribute::Reset));
+            println!();
+        } else if config.clean_sam {
+            let cleaned = cleanup_sam_files(&config.output_dir, &all_samples);
+            println!("  --clean-sam: deleted {} chimeric SAM file(s).", cleaned);
+            println!();
+        }
+    }
+
+    // ── Plain summary when TUI feature is disabled ──
+    #[cfg(not(feature = "tui"))]
+    {
+        println!();
+        if was_cancelled {
+            println!("  STAR-RSeQC — Cancelled by user");
+        } else if total_failures > 0 {
+            println!("  STAR-RSeQC — Completed with errors");
+        } else {
+            println!("  STAR-RSeQC — Run Complete");
+        }
+        println!("    Total samples: {}", total);
+        println!("    Phase 1 (STAR): {} done, {} failed", phase1_completed, phase1_failed);
+        println!("    Phase 2 (deeptools): {} done, {} failed", phase2_completed, phase2_failed_final);
+        println!("    Phase 3 (RSeQC): {} done, {} failed", phase3_completed, phase3_failed_final);
+        println!("    Elapsed: {}", elapsed_str);
+        println!("    Output: {}", config.output_dir.display());
+        println!();
+        if was_cancelled {
+            println!("  Run was cancelled. Re-run to resume.");
+        } else if total_failures > 0 {
+            println!("  Some samples failed. Re-run to retry.");
+        } else if config.clean_sam {
+            let cleaned = cleanup_sam_files(&config.output_dir, &all_samples);
+            println!("  --clean-sam: deleted {} chimeric SAM file(s).", cleaned);
+        }
     }
 
     if total_failures == 0 && !was_cancelled {
@@ -3735,7 +4060,6 @@ fn write_summary_files(output_dir: &Path, samples: &[Sample], was_cancelled: boo
         // RSeQC outputs
         strand_qc: bool,
         genebody_txt: bool,
-        genebody_r: bool,
         genebody_curves_pdf: bool,
         genebody_heatmap_pdf: bool,
         readdist_qc: bool,
@@ -3777,7 +4101,6 @@ fn write_summary_files(output_dir: &Path, samples: &[Sample], was_cancelled: boo
                 // RSeQC
                 strand_qc: qc_dir.join(format!("{n}.strand.txt")).exists(),
                 genebody_txt: qc_dir.join(format!("{n}.geneBodyCoverage.txt")).exists(),
-                genebody_r: qc_dir.join(format!("{n}.geneBodyCoverage_plot.r")).exists(),
                 genebody_curves_pdf: qc_dir.join(format!("{n}.geneBodyCoverage.curves.pdf")).exists(),
                 genebody_heatmap_pdf: qc_dir.join(format!("{n}.geneBodyCoverage.heatMap.pdf")).exists(),
                 readdist_qc: qc_dir.join(format!("{n}.read_distribution.txt")).exists(),
@@ -3810,19 +4133,19 @@ fn write_summary_files(output_dir: &Path, samples: &[Sample], was_cancelled: boo
     tsv.push_str(
         "sample\tsha256\trun_cancelled\tlog_final\tlog_out\tlog_progress\tbam_sorted\tbam_index\t\
          bam_transcriptome\tgene_counts\tsplice_junctions\tchimeric_junction\tchimeric_sam\t\
-         strand_qc\tgenebody_txt\tgenebody_r\tgenebody_curves_pdf\tgenebody_heatmap_pdf\treaddist_qc\n",
+         strand_qc\tgenebody_txt\tgenebody_curves_pdf\tgenebody_heatmap_pdf\treaddist_qc\n",
     );
     for r in &rows {
         let ok = |b: bool| if b { "OK" } else { "MISSING" };
         tsv.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             r.sample, r.sha256,
             was_cancelled,
             ok(r.log_final), ok(r.log_out), ok(r.log_progress),
             ok(r.bam_sorted), ok(r.bam_index),
             ok(r.bam_transcriptome), ok(r.gene_counts), ok(r.splice_junctions),
             ok(r.chimeric_junction), ok(r.chimeric_sam), ok(r.strand_qc),
-            ok(r.genebody_txt), ok(r.genebody_r), ok(r.genebody_curves_pdf),
+            ok(r.genebody_txt), ok(r.genebody_curves_pdf),
             ok(r.genebody_heatmap_pdf), ok(r.readdist_qc),
         ));
     }

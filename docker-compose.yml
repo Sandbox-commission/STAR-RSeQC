@@ -1,0 +1,24 @@
+services:
+  star-rseqc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: star-rseqc:latest
+    container_name: star-rseqc
+    working_dir: /work
+    volumes:
+      - ./data:/work/data:ro
+      - ./refs:/work/refs:ro
+      - ./results:/work/results
+    command:
+      - ${FASTQ_DIR:-/work/data}
+      - --output
+      - ${OUTPUT_DIR:-/work/results}
+      - --genome-dir
+      - ${GENOME_DIR:-/work/refs/star_index}
+      - --gtf
+      - ${GTF_FILE:-/work/refs/annotation.gtf}
+      - --jobs
+      - ${JOBS:-1}
+      - --threads
+      - ${THREADS:-4}

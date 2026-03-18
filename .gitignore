@@ -1,5 +1,9 @@
 /target
 /star-rseqc-results/
+data/
+refs/
+results/
+.env
 test_samples.txt
 log.txt
 *.log
