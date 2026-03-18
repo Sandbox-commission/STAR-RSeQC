@@ -56,6 +56,7 @@ static CANCELLED: AtomicBool = AtomicBool::new(false);
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
 const SAMTOOLS_BIN: &str = "samtools"; // resolved from $PATH by default
+const DEFAULTS_FILE_ENV: &str = "STAR_RSEQC_DEFAULTS_FILE";
 
 const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -86,6 +87,7 @@ fn usage() {
     eprintln!();
     eprintln!("USAGE:");
     eprintln!("    star-rseqc <FASTQ_DIR> [OPTIONS]");
+    eprintln!("    star-rseqc doctor [OPTIONS]");
     eprintln!();
     eprintln!("DESCRIPTION:");
     eprintln!("    Complete RNA-seq 2-phase pipeline for paired-end reads:");
@@ -152,6 +154,11 @@ fn usage() {
     eprintln!("    STAR_RSEQC_STAR_ENV       Default for --star-env");
     eprintln!("    STAR_RSEQC_RSEQC_ENV      Default for --rseqc-env");
     eprintln!("    STAR_RSEQC_DEEPTOOLS_ENV  Default for --deeptools-env");
+    eprintln!("    STAR_RSEQC_DEFAULTS_FILE  Optional defaults file path override");
+    eprintln!(
+        "                              [default lookup: $XDG_CONFIG_HOME/star-rseqc/defaults.env,"
+    );
+    eprintln!("                               then ~/.config/star-rseqc/defaults.env]");
     eprintln!("    --samtools <PATH>         samtools binary path");
     eprintln!("                              [default: {}]", SAMTOOLS_BIN);
     eprintln!();
@@ -247,6 +254,29 @@ fn usage() {
     eprintln!("    Install: apt-get install r-base && Rscript -e 'install.packages(\"ggplot2\")'");
 }
 
+fn doctor_usage() {
+    eprintln!();
+    eprintln!("USAGE:");
+    eprintln!("    star-rseqc doctor [OPTIONS]");
+    eprintln!();
+    eprintln!("DESCRIPTION:");
+    eprintln!("    Print effective default values and their source.");
+    eprintln!("    Source precedence: CLI > env > persisted defaults file > built-in.");
+    eprintln!();
+    eprintln!("OPTIONS:");
+    eprintln!("    --genome-dir <DIR>        Test CLI override for genome dir");
+    eprintln!("    --gtf <FILE>              Test CLI override for GTF");
+    eprintln!("    --star-env <DIR>          Test CLI override for STAR env");
+    eprintln!("    --rseqc-env <DIR>         Test CLI override for RSeQC env");
+    eprintln!("    --deeptools-env <DIR>     Test CLI override for deeptools env");
+    eprintln!("    --samtools <PATH>         Test CLI override for samtools");
+    eprintln!(
+        "    --defaults-file <FILE>    Override persisted defaults file path for this command"
+    );
+    eprintln!("    -h, --help                Show this help");
+    eprintln!();
+}
+
 // ─── System resource detection ───────────────────────────────────────────────
 
 fn read_available_ram() -> u64 {
@@ -315,12 +345,331 @@ struct Config {
     resources_auto: bool,
 }
 
+#[derive(Clone, Copy)]
+enum ValueSource {
+    Cli,
+    Env,
+    Persisted,
+    Builtin,
+    Unset,
+}
+
+impl ValueSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            ValueSource::Cli => "cli",
+            ValueSource::Env => "env",
+            ValueSource::Persisted => "persisted file",
+            ValueSource::Builtin => "built-in default",
+            ValueSource::Unset => "unset",
+        }
+    }
+}
+
+struct PersistedDefaults {
+    values: HashMap<String, String>,
+    path: Option<PathBuf>,
+}
+
+fn unquote_env_value(value: &str) -> &str {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        let first = bytes[0];
+        let last = bytes[value.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn defaults_file_candidates(override_path: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(p) = override_path {
+        paths.push(p.to_path_buf());
+    }
+
+    if let Ok(p) = env::var(DEFAULTS_FILE_ENV) {
+        let t = p.trim();
+        if !t.is_empty() {
+            paths.push(PathBuf::from(t));
+        }
+    }
+    if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
+        let t = xdg.trim();
+        if !t.is_empty() {
+            paths.push(PathBuf::from(t).join("star-rseqc").join("defaults.env"));
+        }
+    }
+    if let Ok(home) = env::var("HOME") {
+        let t = home.trim();
+        if !t.is_empty() {
+            paths.push(
+                PathBuf::from(t)
+                    .join(".config")
+                    .join("star-rseqc")
+                    .join("defaults.env"),
+            );
+        }
+    }
+
+    let mut unique = Vec::new();
+    for p in paths {
+        if !unique.iter().any(|u: &PathBuf| u == &p) {
+            unique.push(p);
+        }
+    }
+    unique
+}
+
+fn load_persisted_defaults(override_path: Option<&Path>) -> PersistedDefaults {
+    let mut values = HashMap::new();
+    let mut used_path = None;
+
+    for path in defaults_file_candidates(override_path) {
+        let file = match File::open(&path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let reader = BufReader::new(file);
+        for line in reader.lines().map_while(Result::ok) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((raw_key, raw_val)) = trimmed.split_once('=') else {
+                continue;
+            };
+            let key = raw_key.trim();
+            if key.is_empty() {
+                continue;
+            }
+            let value = unquote_env_value(raw_val.trim()).trim();
+            if !value.is_empty() {
+                values.insert(key.to_string(), value.to_string());
+            }
+        }
+        used_path = Some(path);
+        break;
+    }
+
+    PersistedDefaults {
+        values,
+        path: used_path,
+    }
+}
+
+fn resolve_default_var(key: &str, persisted: &HashMap<String, String>) -> Option<String> {
+    if let Ok(v) = env::var(key) {
+        let t = v.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    persisted
+        .get(key)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn resolve_with_source(
+    cli_value: Option<String>,
+    env_key: &str,
+    persisted: &HashMap<String, String>,
+    builtin: Option<&str>,
+) -> (Option<String>, ValueSource) {
+    if let Some(v) = cli_value {
+        let t = v.trim().to_string();
+        if !t.is_empty() {
+            return (Some(t), ValueSource::Cli);
+        }
+    }
+    if let Ok(v) = env::var(env_key) {
+        let t = v.trim().to_string();
+        if !t.is_empty() {
+            return (Some(t), ValueSource::Env);
+        }
+    }
+    if let Some(v) = persisted.get(env_key) {
+        let t = v.trim().to_string();
+        if !t.is_empty() {
+            return (Some(t), ValueSource::Persisted);
+        }
+    }
+    if let Some(v) = builtin {
+        return (Some(v.to_string()), ValueSource::Builtin);
+    }
+    (None, ValueSource::Unset)
+}
+
+fn run_doctor(args: &[String]) -> ExitCode {
+    let mut cli_genome_dir: Option<String> = None;
+    let mut cli_gtf: Option<String> = None;
+    let mut cli_star_env: Option<String> = None;
+    let mut cli_rseqc_env: Option<String> = None;
+    let mut cli_deeptools_env: Option<String> = None;
+    let mut cli_samtools: Option<String> = None;
+    let mut defaults_override: Option<PathBuf> = None;
+
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-h" | "--help" => {
+                doctor_usage();
+                return ExitCode::SUCCESS;
+            }
+            "--genome-dir" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --genome-dir requires a value.");
+                    return ExitCode::FAILURE;
+                }
+                cli_genome_dir = Some(args[i].clone());
+            }
+            "--gtf" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --gtf requires a value.");
+                    return ExitCode::FAILURE;
+                }
+                cli_gtf = Some(args[i].clone());
+            }
+            "--star-env" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --star-env requires a value.");
+                    return ExitCode::FAILURE;
+                }
+                cli_star_env = Some(args[i].clone());
+            }
+            "--rseqc-env" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --rseqc-env requires a value.");
+                    return ExitCode::FAILURE;
+                }
+                cli_rseqc_env = Some(args[i].clone());
+            }
+            "--deeptools-env" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --deeptools-env requires a value.");
+                    return ExitCode::FAILURE;
+                }
+                cli_deeptools_env = Some(args[i].clone());
+            }
+            "--samtools" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --samtools requires a value.");
+                    return ExitCode::FAILURE;
+                }
+                cli_samtools = Some(args[i].clone());
+            }
+            "--defaults-file" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --defaults-file requires a value.");
+                    return ExitCode::FAILURE;
+                }
+                defaults_override = Some(PathBuf::from(&args[i]));
+            }
+            other => {
+                eprintln!("Unknown doctor option: {other}");
+                eprintln!("Run with: star-rseqc doctor --help");
+                return ExitCode::FAILURE;
+            }
+        }
+        i += 1;
+    }
+
+    let persisted = load_persisted_defaults(defaults_override.as_deref());
+    let persisted_path = persisted
+        .path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(not found)".to_string());
+
+    let (genome_dir, genome_src) = resolve_with_source(
+        cli_genome_dir,
+        "STAR_RSEQC_GENOME_DIR",
+        &persisted.values,
+        None,
+    );
+    let (gtf, gtf_src) = resolve_with_source(cli_gtf, "STAR_RSEQC_GTF", &persisted.values, None);
+    let (star_env, star_env_src) =
+        resolve_with_source(cli_star_env, "STAR_RSEQC_STAR_ENV", &persisted.values, None);
+    let (rseqc_env, rseqc_env_src) = resolve_with_source(
+        cli_rseqc_env,
+        "STAR_RSEQC_RSEQC_ENV",
+        &persisted.values,
+        None,
+    );
+    let (deeptools_env, deeptools_env_src) = resolve_with_source(
+        cli_deeptools_env,
+        "STAR_RSEQC_DEEPTOOLS_ENV",
+        &persisted.values,
+        None,
+    );
+    let (samtools, samtools_src) = if let Some(v) = cli_samtools {
+        (Some(v), ValueSource::Cli)
+    } else {
+        (Some(SAMTOOLS_BIN.to_string()), ValueSource::Builtin)
+    };
+
+    println!("star-rseqc doctor");
+    println!("persisted defaults file: {}", persisted_path);
+    println!();
+    println!("{:<28} {:<16} value", "setting", "source");
+    println!("{:-<28} {:-<16} -----", "", "");
+    println!(
+        "{:<28} {:<16} {}",
+        "STAR_RSEQC_GENOME_DIR",
+        genome_src.as_str(),
+        genome_dir.unwrap_or_else(|| "(unset)".to_string())
+    );
+    println!(
+        "{:<28} {:<16} {}",
+        "STAR_RSEQC_GTF",
+        gtf_src.as_str(),
+        gtf.unwrap_or_else(|| "(unset)".to_string())
+    );
+    println!(
+        "{:<28} {:<16} {}",
+        "STAR_RSEQC_STAR_ENV",
+        star_env_src.as_str(),
+        star_env.unwrap_or_else(|| "(unset)".to_string())
+    );
+    println!(
+        "{:<28} {:<16} {}",
+        "STAR_RSEQC_RSEQC_ENV",
+        rseqc_env_src.as_str(),
+        rseqc_env.unwrap_or_else(|| "(unset)".to_string())
+    );
+    println!(
+        "{:<28} {:<16} {}",
+        "STAR_RSEQC_DEEPTOOLS_ENV",
+        deeptools_env_src.as_str(),
+        deeptools_env.unwrap_or_else(|| "(unset)".to_string())
+    );
+    println!(
+        "{:<28} {:<16} {}",
+        "samtools",
+        samtools_src.as_str(),
+        samtools.unwrap_or_else(|| "(unset)".to_string())
+    );
+
+    ExitCode::SUCCESS
+}
+
 /// Return value from parse_args:
 ///   Ok(Config)  — proceed normally
 ///   Err(true)   — --help was printed; exit 0
 ///   Err(false)  — argument error; exit 1
 fn parse_args() -> Result<Config, bool> {
     let args: Vec<String> = env::args().collect();
+    let persisted_defaults = load_persisted_defaults(None);
 
     if args.len() < 2 {
         usage();
@@ -330,39 +679,20 @@ fn parse_args() -> Result<Config, bool> {
     let mut fastq_dir: Option<PathBuf> = None;
     let mut output_dir = PathBuf::from("star-rseqc-results");
     // Environment variables provide optional defaults. Explicit flags override env vars.
-    let mut genome_dir = env::var("STAR_RSEQC_GENOME_DIR")
-        .ok()
-        .map(|v| PathBuf::from(v.trim().to_string()))
+    let mut genome_dir = resolve_default_var("STAR_RSEQC_GENOME_DIR", &persisted_defaults.values)
+        .map(PathBuf::from)
         .unwrap_or_default();
-    let mut gtf = env::var("STAR_RSEQC_GTF")
-        .ok()
-        .map(|v| PathBuf::from(v.trim().to_string()))
+    let mut gtf = resolve_default_var("STAR_RSEQC_GTF", &persisted_defaults.values)
+        .map(PathBuf::from)
         .unwrap_or_default();
     let mut bed: Option<PathBuf> = None;
-    let mut star_env = env::var("STAR_RSEQC_STAR_ENV").ok().and_then(|v| {
-        let t = v.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(t))
-        }
-    });
-    let mut rseqc_env = env::var("STAR_RSEQC_RSEQC_ENV").ok().and_then(|v| {
-        let t = v.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(t))
-        }
-    });
-    let mut deeptools_env = env::var("STAR_RSEQC_DEEPTOOLS_ENV").ok().and_then(|v| {
-        let t = v.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(t))
-        }
-    });
+    let mut star_env =
+        resolve_default_var("STAR_RSEQC_STAR_ENV", &persisted_defaults.values).map(PathBuf::from);
+    let mut rseqc_env =
+        resolve_default_var("STAR_RSEQC_RSEQC_ENV", &persisted_defaults.values).map(PathBuf::from);
+    let mut deeptools_env =
+        resolve_default_var("STAR_RSEQC_DEEPTOOLS_ENV", &persisted_defaults.values)
+            .map(PathBuf::from);
     let mut samtools = PathBuf::from(SAMTOOLS_BIN);
     let mut threads_per_sample: Option<usize> = None;
     let mut parallel_jobs: Option<usize> = None;
@@ -3551,6 +3881,11 @@ fn main() -> ExitCode {
             );
             default_hook(info);
         }));
+    }
+
+    let top_args: Vec<String> = env::args().collect();
+    if top_args.get(1).map(String::as_str) == Some("doctor") {
+        return run_doctor(&top_args[2..]);
     }
 
     let mut config = match parse_args() {

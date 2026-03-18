@@ -134,6 +134,14 @@ By default, `setup.sh` performs setup only (installs dependencies and prepares
 references). It does not ask for FASTQ paths unless you explicitly request
 analysis with `--run`.
 
+At the end of setup, it writes persisted defaults to
+`~/.config/star-rseqc/defaults.env` (or `$XDG_CONFIG_HOME/star-rseqc/defaults.env`),
+so direct `star-rseqc` runs remember references and tool env paths without
+repeating `--genome-dir` and `--gtf`.
+
+In Conda mode, this also stores tool environment paths, so you can run
+`star-rseqc` from a normal shell without `mamba activate star-rseqc`.
+
 Run analysis later when ready:
 
 ```bash
@@ -210,6 +218,9 @@ star-rseqc ./ --dry-run
 
 # Resume after interruption (just re-run the same command)
 star-rseqc ./
+
+# Show where defaults are coming from (CLI/env/persisted file)
+star-rseqc doctor
 ```
 
 ---
@@ -295,6 +306,12 @@ star-rseqc ./
    conda run -n star-rseqc star-rseqc --help
    ```
 
+   - Diagnose defaults/tool-path resolution quickly:
+
+   ```bash
+   star-rseqc doctor
+   ```
+
    - or rerun `./setup.sh --mode conda` to recreate/update env from `environment.yml`.
 
 ---
@@ -303,6 +320,7 @@ star-rseqc ./
 
 ```bash
 star-rseqc <FASTQ_DIR> [OPTIONS]
+star-rseqc doctor [OPTIONS]
 ```
 
 ### Arguments
@@ -310,6 +328,15 @@ star-rseqc <FASTQ_DIR> [OPTIONS]
 | Argument | Description |
 | -------- | ----------- |
 | `<FASTQ_DIR>` | Directory containing `*_1P.fastq.gz` paired-end FASTQ files |
+
+### Doctor command
+
+```bash
+star-rseqc doctor
+```
+
+Prints the effective defaults and where each came from:
+`cli`, `env`, `persisted file`, `built-in default`, or `unset`.
 
 ### Options
 
