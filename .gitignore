@@ -1,0 +1,8 @@
+/target
+/star-rseqc-results/
+test_samples.txt
+log.txt
+*.log
+*monitor*.sh
+check_pipeline_status.sh
+final_status.sh
