@@ -94,7 +94,7 @@ All default paths can be overridden via command-line flags or environment variab
 ## Installation
 
 ```bash
-git clone <your-fork-or-repo-url> star-rseqc
+git clone https://github.com/Sandbox-commission/STAR-RSeQC.git star-rseqc
 cd star-rseqc
 cargo build --release
 
@@ -134,12 +134,14 @@ Non-interactive examples:
 ./setup.sh --mode conda --non-interactive \
   --fastq-dir ./data \
   --output-dir ./results \
+  --ref-dir ./refs \
   --genome-dir ./refs/star_index \
   --gtf ./refs/annotation.gtf
 
 # Build STAR index from local FASTA + GTF
 ./setup.sh --mode manual --non-interactive \
   --ref-mode local \
+  --ref-dir ./refs \
   --ref-source-dir ./refs \
   --ref-fasta ./refs/genome.fa.gz \
   --gtf ./refs/annotation.gtf \
@@ -150,6 +152,7 @@ Non-interactive examples:
 # Download from Ensembl and build index
 ./setup.sh --mode conda --non-interactive \
   --ref-mode ensembl \
+  --ref-dir ./refs \
   --ensembl-release 113 \
   --read-length 101 \
   --fastq-dir ./data \
@@ -170,8 +173,9 @@ Non-interactive examples:
 
 ## Quick Start
 
-For first-time setup, use `./setup.sh`. The commands below assume `--genome-dir`
-and `--gtf` are already configured (via flags or `STAR_RSEQC_*` env vars).
+For first-time setup, use `./setup.sh`. It will prompt you to provide the
+reference path(s) (existing STAR index + GTF, local FASTA/GTF, or Ensembl
+download) before running the pipeline.
 
 ```bash
 # Run on a directory containing paired-end FASTQs

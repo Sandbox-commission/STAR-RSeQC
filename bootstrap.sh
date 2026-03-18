@@ -18,6 +18,7 @@ GTF_FILE=""
 JOBS=""
 THREADS=""
 REF_SETUP_MODE=""
+REF_DIR=""
 REF_SOURCE_DIR=""
 REF_FASTA_FILE=""
 REF_READ_LENGTH="101"
@@ -61,6 +62,7 @@ Options:
   --threads <N>                 Threads override for full run
   --ref-mode <existing|local|ensembl>
                                 Reference setup mode
+  --ref-dir <DIR>               Reference base directory (auto-detects files)
   --ref-source-dir <DIR>        For --ref-mode local: dir containing FASTA + GTF
   --ref-fasta <FILE>            For --ref-mode local: genome FASTA/FA/FNA(.gz)
   --read-length <N>             Read length (for STAR sjdbOverhang, default: 101)
@@ -110,6 +112,10 @@ parse_args() {
         ;;
       --ref-mode)
         REF_SETUP_MODE="${2:-}"
+        shift 2
+        ;;
+      --ref-dir)
+        REF_DIR="${2:-}"
         shift 2
         ;;
       --ref-source-dir)
@@ -275,11 +281,35 @@ interactive_path_prompt() {
 
   case "$REF_SETUP_MODE" in
     existing)
-      GENOME_DIR="$(prompt_default "STAR genome index directory" "$GENOME_DIR")"
-      GTF_FILE="$(prompt_default "GTF file path" "$GTF_FILE")"
+      REF_DIR="$(prompt_default "Reference directory (contains STAR index + GTF)" "${REF_DIR:-$ROOT_DIR/refs}")"
+      if [[ -d "$REF_DIR" ]]; then
+        local auto_gtf auto_genome
+        auto_gtf="$(first_match "$REF_DIR" "*.gtf" "*.gtf.gz" || true)"
+        auto_genome=""
+        if [[ -e "$REF_DIR/Genome" ]]; then
+          auto_genome="$REF_DIR"
+        elif [[ -e "$REF_DIR/star_index/Genome" ]]; then
+          auto_genome="$REF_DIR/star_index"
+        else
+          local genome_file
+          genome_file="$(find "$REF_DIR" -maxdepth 3 -type f -name "Genome" | sort | head -n 1 || true)"
+          if [[ -n "$genome_file" ]]; then
+            auto_genome="$(dirname "$genome_file")"
+          fi
+        fi
+        if [[ -n "$auto_gtf" ]]; then
+          GTF_FILE="$auto_gtf"
+        fi
+        if [[ -n "$auto_genome" ]]; then
+          GENOME_DIR="$auto_genome"
+        fi
+      fi
+      GENOME_DIR="$(prompt_default "STAR genome index directory" "${GENOME_DIR:-$REF_DIR/star_index}")"
+      GTF_FILE="$(prompt_default "GTF file path" "${GTF_FILE:-$REF_DIR/annotation.gtf}")"
       ;;
     local)
-      REF_SOURCE_DIR="$(prompt_default "Directory containing FASTA/FNA/FA + GTF" "${REF_SOURCE_DIR:-$ROOT_DIR/refs}")"
+      REF_DIR="$(prompt_default "Reference directory (contains FASTA/FNA/FA + GTF)" "${REF_DIR:-$ROOT_DIR/refs}")"
+      REF_SOURCE_DIR="$REF_DIR"
       if [[ -d "$REF_SOURCE_DIR" ]]; then
         local auto_gtf auto_fa
         auto_gtf="$(first_match "$REF_SOURCE_DIR" "*.gtf" "*.gtf.gz" || true)"
@@ -291,16 +321,15 @@ interactive_path_prompt() {
           REF_FASTA_FILE="$auto_fa"
         fi
       fi
-      GTF_FILE="$(prompt_default "GTF file path" "${GTF_FILE:-$ROOT_DIR/refs/annotation.gtf}")"
-      REF_FASTA_FILE="$(prompt_default "FASTA/FNA/FA file path" "${REF_FASTA_FILE:-$ROOT_DIR/refs/genome.fa.gz}")"
-      GENOME_DIR="$(prompt_default "STAR index output directory" "$GENOME_DIR")"
+      GTF_FILE="$(prompt_default "GTF file path" "${GTF_FILE:-$REF_DIR/annotation.gtf}")"
+      REF_FASTA_FILE="$(prompt_default "FASTA/FNA/FA file path" "${REF_FASTA_FILE:-$REF_DIR/genome.fa.gz}")"
+      GENOME_DIR="$(prompt_default "STAR index output directory" "${GENOME_DIR:-$REF_DIR/star_index}")"
       REF_READ_LENGTH="$(prompt_default "Read length (for sjdbOverhang)" "$REF_READ_LENGTH")"
       ;;
     ensembl)
-      local refs_out
-      refs_out="$(prompt_default "Reference output base directory" "$ROOT_DIR/refs")"
-      GENOME_DIR="$refs_out/star_index"
-      GTF_FILE="$refs_out/annotation.gtf"
+      REF_DIR="$(prompt_default "Reference output base directory" "${REF_DIR:-$ROOT_DIR/refs}")"
+      GENOME_DIR="$REF_DIR/star_index"
+      GTF_FILE="$REF_DIR/annotation.gtf"
       ENSEMBL_RELEASE="$(prompt_default "Ensembl release" "$ENSEMBL_RELEASE")"
       REF_READ_LENGTH="$(prompt_default "Read length (for sjdbOverhang)" "$REF_READ_LENGTH")"
       ;;
@@ -469,6 +498,57 @@ prepare_references_docker() {
   esac
 }
 
+apply_ref_dir_hints() {
+  if [[ -z "$REF_DIR" || ! -d "$REF_DIR" ]]; then
+    return 0
+  fi
+
+  case "${REF_SETUP_MODE:-existing}" in
+    existing)
+      if [[ -z "$GENOME_DIR" ]]; then
+        if [[ -e "$REF_DIR/Genome" ]]; then
+          GENOME_DIR="$REF_DIR"
+        elif [[ -e "$REF_DIR/star_index/Genome" ]]; then
+          GENOME_DIR="$REF_DIR/star_index"
+        else
+          local genome_file
+          genome_file="$(find "$REF_DIR" -maxdepth 3 -type f -name "Genome" | sort | head -n 1 || true)"
+          if [[ -n "$genome_file" ]]; then
+            GENOME_DIR="$(dirname "$genome_file")"
+          fi
+        fi
+      fi
+      if [[ -z "$GTF_FILE" ]]; then
+        GTF_FILE="$(first_match "$REF_DIR" "*.gtf" "*.gtf.gz" || true)"
+      fi
+      ;;
+    local)
+      if [[ -z "$REF_SOURCE_DIR" ]]; then
+        REF_SOURCE_DIR="$REF_DIR"
+      fi
+      if [[ -z "$GTF_FILE" ]]; then
+        GTF_FILE="$(first_match "$REF_DIR" "*.gtf" "*.gtf.gz" || true)"
+      fi
+      if [[ -z "$REF_FASTA_FILE" ]]; then
+        REF_FASTA_FILE="$(first_match "$REF_DIR" "*.fa" "*.fasta" "*.fna" "*.fa.gz" "*.fasta.gz" "*.fna.gz" || true)"
+      fi
+      if [[ -z "$GENOME_DIR" ]]; then
+        GENOME_DIR="$REF_DIR/star_index"
+      fi
+      ;;
+    ensembl)
+      if [[ -z "$GENOME_DIR" ]]; then
+        GENOME_DIR="$REF_DIR/star_index"
+      fi
+      if [[ -z "$GTF_FILE" ]]; then
+        GTF_FILE="$REF_DIR/annotation.gtf"
+      fi
+      ;;
+    *)
+      ;;
+  esac
+}
+
 should_run_full() {
   if [[ $AUTO_RUN -eq 1 ]]; then
     return 0
@@ -496,6 +576,7 @@ load_path_defaults() {
     local cli_output="$OUTPUT_DIR"
     local cli_genome="$GENOME_DIR"
     local cli_gtf="$GTF_FILE"
+    local cli_ref_dir="$REF_DIR"
     local cli_jobs="$JOBS"
     local cli_threads="$THREADS"
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -520,7 +601,7 @@ load_path_defaults() {
       fi
 
       case "$key" in
-        FASTQ_DIR|OUTPUT_DIR|GENOME_DIR|GTF_FILE|JOBS|THREADS)
+        FASTQ_DIR|OUTPUT_DIR|GENOME_DIR|GTF_FILE|REF_DIR|JOBS|THREADS)
           printf -v "$key" '%s' "$val"
           ;;
         *)
@@ -532,6 +613,7 @@ load_path_defaults() {
     if [[ -n "$cli_output" ]]; then OUTPUT_DIR="$cli_output"; fi
     if [[ -n "$cli_genome" ]]; then GENOME_DIR="$cli_genome"; fi
     if [[ -n "$cli_gtf" ]]; then GTF_FILE="$cli_gtf"; fi
+    if [[ -n "$cli_ref_dir" ]]; then REF_DIR="$cli_ref_dir"; fi
     if [[ -n "$cli_jobs" ]]; then JOBS="$cli_jobs"; fi
     if [[ -n "$cli_threads" ]]; then THREADS="$cli_threads"; fi
   fi
@@ -561,6 +643,9 @@ load_path_defaults() {
   GTF_FILE="$(resolve_path "$GTF_FILE")"
   if [[ -n "$REF_SOURCE_DIR" ]]; then
     REF_SOURCE_DIR="$(resolve_path "$REF_SOURCE_DIR")"
+  fi
+  if [[ -n "$REF_DIR" ]]; then
+    REF_DIR="$(resolve_path "$REF_DIR")"
   fi
   if [[ -n "$REF_FASTA_FILE" ]]; then
     REF_FASTA_FILE="$(resolve_path "$REF_FASTA_FILE")"
@@ -603,6 +688,7 @@ run_docker_mode() {
   setup_repo_dirs
   ensure_env_file
   load_path_defaults
+  apply_ref_dir_hints
   interactive_path_prompt
   log "Building container image"
   docker compose build
@@ -663,6 +749,7 @@ run_conda_mode() {
   setup_repo_dirs
   ensure_env_file
   load_path_defaults
+  apply_ref_dir_hints
   interactive_path_prompt
   ensure_precheck_script
 
@@ -711,6 +798,7 @@ run_manual_mode() {
   setup_repo_dirs
   ensure_env_file
   load_path_defaults
+  apply_ref_dir_hints
   interactive_path_prompt
   prepare_references_host
   ensure_precheck_script
