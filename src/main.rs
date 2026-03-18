@@ -1,4 +1,6 @@
 use chrono::Local;
+#[cfg(not(feature = "tui"))]
+use crossterm::tty::IsTty;
 #[cfg(feature = "tui")]
 use crossterm::{
     cursor, event, execute,
@@ -6,8 +8,6 @@ use crossterm::{
     terminal,
     tty::IsTty,
 };
-#[cfg(not(feature = "tui"))]
-use crossterm::tty::IsTty;
 use glob::glob;
 use std::collections::{HashMap, VecDeque};
 use std::env;
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "tui")]
 mod tui;
 #[cfg(feature = "tui")]
-use tui::{fmt_duration, print_gradient_bar, compute_layout, RenderSnapshot, JobSlotSnapshot};
+use tui::{compute_layout, fmt_duration, print_gradient_bar, JobSlotSnapshot, RenderSnapshot};
 
 #[cfg(not(feature = "tui"))]
 mod tui_stubs {
@@ -32,11 +32,19 @@ mod tui_stubs {
         let h = secs / 3600;
         let m = (secs % 3600) / 60;
         let s = secs % 60;
-        if h > 0 { format!("{h:02}:{m:02}:{s:02}") } else { format!("{m:02}:{s:02}") }
+        if h > 0 {
+            format!("{h:02}:{m:02}:{s:02}")
+        } else {
+            format!("{m:02}:{s:02}")
+        }
     }
     pub fn fmt_secs(s: f64) -> String {
-        if s.is_nan() || s.is_infinite() || s < 0.0 { return "??:??".to_string(); }
-        if s >= 359_999.0 { return "99:59:59+".to_string(); }
+        if s.is_nan() || s.is_infinite() || s < 0.0 {
+            return "??:??".to_string();
+        }
+        if s >= 359_999.0 {
+            return "99:59:59+".to_string();
+        }
         fmt_duration(Duration::from_secs_f64(s))
     }
 }
@@ -55,11 +63,21 @@ const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
 fn usage() {
     eprintln!();
-    let w = crossterm::terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
+    let w = crossterm::terminal::size()
+        .map(|(c, _)| c as usize)
+        .unwrap_or(80);
     let sep = "═".repeat(w);
     eprintln!("{sep}");
-    eprintln!("{:^width$}", format!("STAR-RSeQC v{}", env!("CARGO_PKG_VERSION")), width = w);
-    eprintln!("{:^width$}", "RNA-seq 2-pass alignment + quality control pipeline", width = w);
+    eprintln!(
+        "{:^width$}",
+        format!("STAR-RSeQC v{}", env!("CARGO_PKG_VERSION")),
+        width = w
+    );
+    eprintln!(
+        "{:^width$}",
+        "RNA-seq 2-pass alignment + quality control pipeline",
+        width = w
+    );
     eprintln!("{sep}");
     eprintln!();
     eprintln!("QUICK START:");
@@ -102,7 +120,9 @@ fn usage() {
     eprintln!();
     eprintln!("RESOURCE OPTIONS:");
     eprintln!("    -o, --output <DIR>        Output directory [default: star-rseqc-results]");
-    eprintln!("    -j, --jobs <N>            Default parallel jobs [default: auto-detected from RAM]");
+    eprintln!(
+        "    -j, --jobs <N>            Default parallel jobs [default: auto-detected from RAM]"
+    );
     eprintln!("    --star-jobs <N>           STAR phase jobs [default: same as --jobs]");
     eprintln!("    --deeptools-jobs <N>      deeptools phase jobs [default: same as --jobs]");
     eprintln!("    --rseqc-jobs <N>          RSeQC phase jobs [default: same as --jobs]");
@@ -120,7 +140,9 @@ fn usage() {
     eprintln!("    --star-env <DIR>          STAR environment path");
     eprintln!("                              [default: $STAR_RSEQC_STAR_ENV, else STAR from PATH]");
     eprintln!("    --rseqc-env <DIR>         RSeQC environment path");
-    eprintln!("                              [default: $STAR_RSEQC_RSEQC_ENV, else scripts from PATH]");
+    eprintln!(
+        "                              [default: $STAR_RSEQC_RSEQC_ENV, else scripts from PATH]"
+    );
     eprintln!("    --deeptools-env <DIR>     deeptools environment path (for bamCoverage)");
     eprintln!("                              [default: $STAR_RSEQC_DEEPTOOLS_ENV, else bamCoverage from PATH]");
     eprintln!();
@@ -228,11 +250,14 @@ fn usage() {
 // ─── System resource detection ───────────────────────────────────────────────
 
 fn read_available_ram() -> u64 {
-    let Ok(file) = std::fs::File::open("/proc/meminfo") else { return 0; };
+    let Ok(file) = std::fs::File::open("/proc/meminfo") else {
+        return 0;
+    };
     let reader = BufReader::new(file);
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            let kib: u64 = rest.split_whitespace()
+            let kib: u64 = rest
+                .split_whitespace()
                 .next()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
@@ -244,7 +269,9 @@ fn read_available_ram() -> u64 {
 
 fn detect_system_resources() -> (u64, usize) {
     let ram = read_available_ram();
-    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     (ram, cpus)
 }
 
@@ -257,7 +284,9 @@ fn auto_config_resources(available_ram: u64, total_cpus: usize) -> (usize, usize
     let threads = (total_cpus / jobs).max(1);
     // Cap BAM sort RAM at 25% of usable RAM divided across jobs, so we never
     // allocate more sort RAM than the system can provide on constrained machines.
-    let bam_sort_ram = BAM_SORT_MAX.min(usable / (jobs as u64 * 4)).max(1_000_000_000);
+    let bam_sort_ram = BAM_SORT_MAX
+        .min(usable / (jobs as u64 * 4))
+        .max(1_000_000_000);
     (jobs, threads, bam_sort_ram)
 }
 
@@ -312,15 +341,27 @@ fn parse_args() -> Result<Config, bool> {
     let mut bed: Option<PathBuf> = None;
     let mut star_env = env::var("STAR_RSEQC_STAR_ENV").ok().and_then(|v| {
         let t = v.trim();
-        if t.is_empty() { None } else { Some(PathBuf::from(t)) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(t))
+        }
     });
     let mut rseqc_env = env::var("STAR_RSEQC_RSEQC_ENV").ok().and_then(|v| {
         let t = v.trim();
-        if t.is_empty() { None } else { Some(PathBuf::from(t)) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(t))
+        }
     });
     let mut deeptools_env = env::var("STAR_RSEQC_DEEPTOOLS_ENV").ok().and_then(|v| {
         let t = v.trim();
-        if t.is_empty() { None } else { Some(PathBuf::from(t)) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(t))
+        }
     });
     let mut samtools = PathBuf::from(SAMTOOLS_BIN);
     let mut threads_per_sample: Option<usize> = None;
@@ -353,7 +394,10 @@ fn parse_args() -> Result<Config, bool> {
             match $val.parse::<usize>() {
                 Ok(v) => v,
                 Err(_) => {
-                    eprintln!("Error: invalid value for {}: '{}' (expected a positive integer)", $flag, $val);
+                    eprintln!(
+                        "Error: invalid value for {}: '{}' (expected a positive integer)",
+                        $flag, $val
+                    );
                     return Err(false);
                 }
             }
@@ -365,7 +409,10 @@ fn parse_args() -> Result<Config, bool> {
             match $val.parse::<u64>() {
                 Ok(v) => v,
                 Err(_) => {
-                    eprintln!("Error: invalid value for {}: '{}' (expected a positive integer)", $flag, $val);
+                    eprintln!(
+                        "Error: invalid value for {}: '{}' (expected a positive integer)",
+                        $flag, $val
+                    );
                     return Err(false);
                 }
             }
@@ -456,7 +503,8 @@ fn parse_args() -> Result<Config, bool> {
 
     // Resolve resource parameters — auto-detect each missing value individually.
     // resources_auto is only true when everything was auto-detected (for display purposes).
-    let resources_auto = parallel_jobs.is_none() && threads_per_sample.is_none() && bam_sort_ram.is_none();
+    let resources_auto =
+        parallel_jobs.is_none() && threads_per_sample.is_none() && bam_sort_ram.is_none();
     let (parallel_jobs, threads_per_sample, bam_sort_ram) = {
         let (avail_ram, total_cpus) = detect_system_resources();
         let (aj, at, ab) = auto_config_resources(avail_ram, total_cpus);
@@ -480,7 +528,8 @@ fn parse_args() -> Result<Config, bool> {
             auto_config_resources(avail_ram, total_cpus)
         };
         ab
-    } && parallel_star_jobs != parallel_jobs {
+    } && parallel_star_jobs != parallel_jobs
+    {
         // User overrode star-jobs but left bam_sort_ram on auto — recalculate for actual star parallelism
         let (avail_ram, _) = detect_system_resources();
         const BAM_SORT_MAX: u64 = 6_000_000_000;
@@ -540,11 +589,12 @@ fn parse_args() -> Result<Config, bool> {
                     .unwrap_or_else(|_| "unknown".to_string())
             });
             // Strip control characters and limit length so the audit JSON is always well-formed.
-            let sanitized: String = raw.chars()
-                .filter(|c| !c.is_control())
-                .take(128)
-                .collect();
-            if sanitized.is_empty() { "unknown".to_string() } else { sanitized }
+            let sanitized: String = raw.chars().filter(|c| !c.is_control()).take(128).collect();
+            if sanitized.is_empty() {
+                "unknown".to_string()
+            } else {
+                sanitized
+            }
         },
         resources_auto,
     })
@@ -594,11 +644,27 @@ struct OverallProgress {
 impl OverallProgress {
     fn new(total_phases: usize) -> Self {
         Self {
-            phase_total: [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
-            phase_done: [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+            phase_total: [
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+            ],
+            phase_done: [
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+            ],
             phase_weights: [0.45, 0.25, 0.30],
-            p3_sub_total: [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
-            p3_sub_done: [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+            p3_sub_total: [
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+            ],
+            p3_sub_done: [
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+            ],
             p3_sub_weights: [0.07, 0.08, 0.15],
             start_time: Instant::now(),
             current_phase: AtomicUsize::new(1),
@@ -642,7 +708,8 @@ impl OverallProgress {
             let d = self.p3_sub_done[i].load(Ordering::Relaxed);
             if t > 0 {
                 // sub weight relative to phase 3: e.g. 0.07/0.30
-                frac += (self.p3_sub_weights[i] / self.phase_weights[2]) * (d.min(t) as f64 / t as f64);
+                frac +=
+                    (self.p3_sub_weights[i] / self.phase_weights[2]) * (d.min(t) as f64 / t as f64);
             }
         }
         frac.min(1.0)
@@ -685,7 +752,10 @@ impl OverallProgress {
 
     /// Total done across all phases.
     fn total_done(&self) -> usize {
-        let p1p2: usize = self.phase_done[..2].iter().map(|d| d.load(Ordering::Relaxed)).sum();
+        let p1p2: usize = self.phase_done[..2]
+            .iter()
+            .map(|d| d.load(Ordering::Relaxed))
+            .sum();
         // For phase 3, count a sample as done when all its sub-tools are done
         // Use phase_done[2] which still tracks per-sample completion
         p1p2 + self.phase_done[2].load(Ordering::Relaxed)
@@ -693,7 +763,10 @@ impl OverallProgress {
 
     /// Total samples across all phases.
     fn total_samples(&self) -> usize {
-        self.phase_total.iter().map(|t| t.load(Ordering::Relaxed)).sum()
+        self.phase_total
+            .iter()
+            .map(|t| t.load(Ordering::Relaxed))
+            .sum()
     }
 }
 
@@ -713,7 +786,12 @@ struct ProgressState {
 }
 
 impl ProgressState {
-    fn new(total: usize, parallel_jobs: usize, phase: &str, overall: Option<Arc<OverallProgress>>) -> Self {
+    fn new(
+        total: usize,
+        parallel_jobs: usize,
+        phase: &str,
+        overall: Option<Arc<OverallProgress>>,
+    ) -> Self {
         let slots = (0..parallel_jobs).map(|_| None).collect();
         Self {
             total,
@@ -860,7 +938,12 @@ fn sha256_file_list(files: &[PathBuf]) -> String {
 
     let mut hasher = Sha256::new();
     for path in files {
-        hasher.update(path.file_name().unwrap_or_default().to_string_lossy().as_bytes());
+        hasher.update(
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .as_bytes(),
+        );
         let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         if path.exists() {
             if size > 0 {
@@ -881,10 +964,10 @@ fn sha256_file_list(files: &[PathBuf]) -> String {
 
 /// Per-step SHA256 digests — one field per individual tool output.
 struct SampleDigests {
-    star:     String,  // Phase 1: BAM + index + logs
+    star: String,      // Phase 1: BAM + index + logs
     deeptools: String, // Phase 2: bigwig
-    infer:    String,  // Phase 3a: strand.txt
-    rdist:    String,  // Phase 3b: read_distribution.txt
+    infer: String,     // Phase 3a: strand.txt
+    rdist: String,     // Phase 3b: read_distribution.txt
     genebody: String,  // Phase 3c: geneBodyCoverage files + PDFs
 }
 
@@ -901,8 +984,8 @@ const STEP_GENEBODY: &str = "genebody";
 ///
 fn sha256_step(output_dir: &Path, sample_name: &str, step: &str) -> String {
     let star_dir = output_dir.join("star");
-    let qc_dir   = output_dir.join("qc");
-    let bw_dir   = output_dir.join("bigwig");
+    let qc_dir = output_dir.join("qc");
+    let bw_dir = output_dir.join("bigwig");
 
     match step {
         STEP_STAR => {
@@ -922,24 +1005,18 @@ fn sha256_step(output_dir: &Path, sample_name: &str, step: &str) -> String {
                 // after alignment and its removal must not invalidate the STAR checkpoint.
             ])
         }
-        STEP_DEEPTOOLS => {
-            sha256_file_list(&[bw_dir.join(format!("{sample_name}.bw"))])
-        }
-        STEP_INFER => {
-            sha256_file_list(&[qc_dir.join(format!("{sample_name}.strand.txt"))])
-        }
+        STEP_DEEPTOOLS => sha256_file_list(&[bw_dir.join(format!("{sample_name}.bw"))]),
+        STEP_INFER => sha256_file_list(&[qc_dir.join(format!("{sample_name}.strand.txt"))]),
         STEP_RDIST => {
             sha256_file_list(&[qc_dir.join(format!("{sample_name}.read_distribution.txt"))])
         }
-        STEP_GENEBODY => {
-            sha256_file_list(&[
-                qc_dir.join(format!("{sample_name}.geneBodyCoverage.txt")),
-                qc_dir.join(format!("{sample_name}.geneBodyCoverage_plot.r")),
-                qc_dir.join(format!("{sample_name}.geneBodyCoverage.pdf")),
-                qc_dir.join(format!("{sample_name}.geneBodyCoverage.curves.pdf")),
-                qc_dir.join(format!("{sample_name}.geneBodyCoverage.heatMap.pdf")),
-            ])
-        }
+        STEP_GENEBODY => sha256_file_list(&[
+            qc_dir.join(format!("{sample_name}.geneBodyCoverage.txt")),
+            qc_dir.join(format!("{sample_name}.geneBodyCoverage_plot.r")),
+            qc_dir.join(format!("{sample_name}.geneBodyCoverage.pdf")),
+            qc_dir.join(format!("{sample_name}.geneBodyCoverage.curves.pdf")),
+            qc_dir.join(format!("{sample_name}.geneBodyCoverage.heatMap.pdf")),
+        ]),
         _ => "UNKNOWN_STEP".to_string(),
     }
 }
@@ -951,7 +1028,11 @@ fn step_checkpoint_path(output_dir: &Path, sample_name: &str, step: &str) -> Pat
 
 /// Write a per-step checkpoint file containing the SHA256 digest.
 /// Called immediately after a step completes successfully.
-fn write_step_checkpoint(output_dir: &Path, sample_name: &str, step: &str) -> Result<String, String> {
+fn write_step_checkpoint(
+    output_dir: &Path,
+    sample_name: &str,
+    step: &str,
+) -> Result<String, String> {
     let dir = checkpoint_dir(output_dir);
     fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create checkpoint dir {}: {e}", dir.display()))?;
@@ -1009,9 +1090,8 @@ fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
         f.write_all(data)?;
         f.sync_all()?; // flush to disk before rename — crash-safe checkpoint
     }
-    fs::rename(&tmp, path).map_err(|e| {
+    fs::rename(&tmp, path).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
-        e
     })
 }
 
@@ -1028,28 +1108,34 @@ fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
 ///   NotDone       — no checkpoints found → process all phases
 #[derive(Clone)]
 enum ResumeStatus {
-    AllDone,        // Phase 1 (STAR) ✓, Phase 2 (deeptools) ✓, Phase 3 (RSeQC) ✓
-    Phase1Changed,  // STAR checkpoint missing/mismatched → redo all
-    Phase2Changed,  // deeptools checkpoint missing/mismatched → redo Phase 2 & 3
-    Phase3Changed,  // RSeQC checkpoint(s) missing/mismatched → redo Phase 3 only
-    NotDone,        // No checkpoints found
+    AllDone,       // Phase 1 (STAR) ✓, Phase 2 (deeptools) ✓, Phase 3 (RSeQC) ✓
+    Phase1Changed, // STAR checkpoint missing/mismatched → redo all
+    Phase2Changed, // deeptools checkpoint missing/mismatched → redo Phase 2 & 3
+    Phase3Changed, // RSeQC checkpoint(s) missing/mismatched → redo Phase 3 only
+    NotDone,       // No checkpoints found
 }
 
 fn check_resume(output_dir: &Path, sample_name: &str) -> ResumeStatus {
-    let star_ok      = is_step_done(output_dir, sample_name, STEP_STAR);
+    let star_ok = is_step_done(output_dir, sample_name, STEP_STAR);
     let deeptools_ok = is_step_done(output_dir, sample_name, STEP_DEEPTOOLS);
-    let infer_ok     = is_step_done(output_dir, sample_name, STEP_INFER);
-    let rdist_ok     = is_step_done(output_dir, sample_name, STEP_RDIST);
-    let genebody_ok  = is_step_done(output_dir, sample_name, STEP_GENEBODY);
-    let phase3_ok    = infer_ok && rdist_ok && genebody_ok;
+    let infer_ok = is_step_done(output_dir, sample_name, STEP_INFER);
+    let rdist_ok = is_step_done(output_dir, sample_name, STEP_RDIST);
+    let genebody_ok = is_step_done(output_dir, sample_name, STEP_GENEBODY);
+    let phase3_ok = infer_ok && rdist_ok && genebody_ok;
 
     // If none of the checkpoints exist at all, treat as NotDone
     let any_exists = star_ok || deeptools_ok || infer_ok || rdist_ok || genebody_ok;
     if !any_exists {
         // Also check if any checkpoint files exist but are mismatched (legacy migration)
-        let has_any_file = [STEP_STAR, STEP_DEEPTOOLS, STEP_INFER, STEP_RDIST, STEP_GENEBODY]
-            .iter()
-            .any(|step| step_checkpoint_path(output_dir, sample_name, step).exists());
+        let has_any_file = [
+            STEP_STAR,
+            STEP_DEEPTOOLS,
+            STEP_INFER,
+            STEP_RDIST,
+            STEP_GENEBODY,
+        ]
+        .iter()
+        .any(|step| step_checkpoint_path(output_dir, sample_name, step).exists());
         if !has_any_file {
             // Also try to migrate from legacy monolithic checkpoint format
             let legacy = checkpoint_dir(output_dir).join(format!("{sample_name}.sha256"));
@@ -1071,7 +1157,9 @@ fn check_resume(output_dir: &Path, sample_name: &str) -> ResumeStatus {
 
 /// Number of threads to use for parallel resume checks.
 /// Defined once here so the display log and the actual spawn count always agree.
-fn resume_check_threads(n: usize) -> usize { n.min(32).max(1) }
+fn resume_check_threads(n: usize) -> usize {
+    n.clamp(1, 32)
+}
 
 /// Parallel resume detection: check all samples simultaneously using thread pool.
 /// Samples are shared via Arc to avoid cloning the full list for each thread.
@@ -1091,19 +1179,20 @@ fn check_resume_all_parallel(output_dir: &Path, samples: &[Sample]) -> Vec<(Stri
         let samps = Arc::clone(&shared_samples);
         let od = Arc::clone(&shared_od);
 
-        let handle = std::thread::spawn(move || {
-            loop {
-                let idx = next_arc.fetch_add(1, Ordering::Relaxed);
-                if idx >= samps.len() {
-                    break;
-                }
-                let sample = &samps[idx];
-                let status = check_resume(&od, &sample.name);
-                res_arc.lock().unwrap_or_else(|e| {
+        let handle = std::thread::spawn(move || loop {
+            let idx = next_arc.fetch_add(1, Ordering::Relaxed);
+            if idx >= samps.len() {
+                break;
+            }
+            let sample = &samps[idx];
+            let status = check_resume(&od, &sample.name);
+            res_arc
+                .lock()
+                .unwrap_or_else(|e| {
                     eprintln!("Warning: mutex poisoned in resume check worker — recovering");
                     e.into_inner()
-                }).push((sample.name.clone(), status));
-            }
+                })
+                .push((sample.name.clone(), status));
         });
 
         handles.push(handle);
@@ -1111,14 +1200,19 @@ fn check_resume_all_parallel(output_dir: &Path, samples: &[Sample]) -> Vec<(Stri
 
     for handle in handles {
         if handle.join().is_err() {
-            eprintln!("Warning: SHA256 worker thread panicked — affected samples will be reprocessed");
+            eprintln!(
+                "Warning: SHA256 worker thread panicked — affected samples will be reprocessed"
+            );
         }
     }
 
-    let final_results = results.lock().unwrap_or_else(|e| {
-        eprintln!("Warning: mutex poisoned in resume results — recovering");
-        e.into_inner()
-    }).clone();
+    let final_results = results
+        .lock()
+        .unwrap_or_else(|e| {
+            eprintln!("Warning: mutex poisoned in resume results — recovering");
+            e.into_inner()
+        })
+        .clone();
     final_results
 }
 
@@ -1160,12 +1254,21 @@ fn discover_samples(fastq_dir: &Path) -> Vec<Sample> {
 
         // Reject names that could traverse paths or inject shell characters.
         // Only alphanumerics, underscore, hyphen, and dot are permitted.
-        if !sample_name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
-            eprintln!("Warning: skipping {} — sample name contains characters outside [A-Za-z0-9_.-]", sample_name);
+        if !sample_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        {
+            eprintln!(
+                "Warning: skipping {} — sample name contains characters outside [A-Za-z0-9_.-]",
+                sample_name
+            );
             continue;
         }
         if sample_name.is_empty() || sample_name.starts_with('.') {
-            eprintln!("Warning: skipping sample with empty or dot-prefixed name ({})", r1_name);
+            eprintln!(
+                "Warning: skipping sample with empty or dot-prefixed name ({})",
+                r1_name
+            );
             continue;
         }
 
@@ -1176,13 +1279,20 @@ fn discover_samples(fastq_dir: &Path) -> Vec<Sample> {
         };
 
         if !r2.exists() {
-            eprintln!("Warning: skipping {} — R2 not found ({})", sample_name, r2.display());
+            eprintln!(
+                "Warning: skipping {} — R2 not found ({})",
+                sample_name,
+                r2.display()
+            );
             continue;
         }
         let r1_size = fs::metadata(&r1).map(|m| m.len()).unwrap_or(0);
         let r2_size = fs::metadata(&r2).map(|m| m.len()).unwrap_or(0);
         if r1_size == 0 || r2_size == 0 {
-            eprintln!("Warning: skipping {} — FASTQ file is empty (R1={}B R2={}B)", sample_name, r1_size, r2_size);
+            eprintln!(
+                "Warning: skipping {} — FASTQ file is empty (R1={}B R2={}B)",
+                sample_name, r1_size, r2_size
+            );
             continue;
         }
 
@@ -1220,8 +1330,11 @@ fn gtf_to_bed12(gtf_path: &Path, bed_path: &Path) -> Result<usize, String> {
         .map_err(|e| format!("Cannot open GTF {}: {}", gtf_path.display(), e))?;
     let reader = BufReader::new(gtf_file);
 
+    type ExonRange = (u64, u64);
+    type TranscriptRecord = (String, String, Vec<ExonRange>);
+
     // Collect exons per transcript: (chrom, strand, Vec<(start, end)>)
-    let mut transcripts: HashMap<String, (String, String, Vec<(u64, u64)>)> = HashMap::new();
+    let mut transcripts: HashMap<String, TranscriptRecord> = HashMap::new();
 
     for line in reader.lines() {
         let line = line.map_err(|e| format!("Read error: {}", e))?;
@@ -1242,7 +1355,9 @@ fn gtf_to_bed12(gtf_path: &Path, bed_path: &Path) -> Result<usize, String> {
             Ok(v) => v,
             Err(_) => continue, // malformed coordinate — skip exon
         };
-        if end <= start { continue; } // zero-length or inverted exon — skip
+        if end <= start {
+            continue;
+        } // zero-length or inverted exon — skip
         let strand = fields[6];
         let attrs = fields[8];
 
@@ -1270,7 +1385,7 @@ fn gtf_to_bed12(gtf_path: &Path, bed_path: &Path) -> Result<usize, String> {
     let mut writer = BufWriter::new(out_file);
 
     // Sort by chromosome then start position for deterministic output
-    let mut tx_vec: Vec<(String, (String, String, Vec<(u64, u64)>))> = transcripts.into_iter().collect();
+    let mut tx_vec: Vec<(String, TranscriptRecord)> = transcripts.into_iter().collect();
     tx_vec.sort_by(|a, b| {
         let (chrom_a, _, exons_a) = &a.1;
         let (chrom_b, _, exons_b) = &b.1;
@@ -1316,7 +1431,9 @@ fn gtf_to_bed12(gtf_path: &Path, bed_path: &Path) -> Result<usize, String> {
         return Err("GTF→BED12 produced zero transcripts".to_string());
     }
     // Flush before rename to ensure all bytes are on disk
-    writer.flush().map_err(|e| format!("BED flush error: {e}"))?;
+    writer
+        .flush()
+        .map_err(|e| format!("BED flush error: {e}"))?;
     drop(writer);
     fs::rename(&tmp_path, bed_path)
         .map_err(|e| format!("Cannot rename BED tmp to {}: {e}", bed_path.display()))?;
@@ -1402,7 +1519,10 @@ fn run_cancellable_with_stdin(mut cmd: Command, input: &str) -> Result<bool, Str
 /// Shared implementation for capture variants.
 /// `combine` = true → stdout + stderr concatenated (for infer_experiment.py which writes to stderr).
 /// `combine` = false → stdout only, stderr drained silently.
-fn run_cancellable_capture_impl(mut cmd: Command, combine: bool) -> Result<Option<Vec<u8>>, String> {
+fn run_cancellable_capture_impl(
+    mut cmd: Command,
+    combine: bool,
+) -> Result<Option<Vec<u8>>, String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("Failed to launch: {e}"))?;
     // Drain stdout AND stderr in background threads to prevent deadlock when
@@ -1424,10 +1544,20 @@ fn run_cancellable_capture_impl(mut cmd: Command, combine: bool) -> Result<Optio
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut out_bytes = stdout_handle.and_then(|h| h.join().ok()).unwrap_or_default();
-                let err_bytes = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
-                if combine { out_bytes.extend_from_slice(&err_bytes); }
-                return if status.success() { Ok(Some(out_bytes)) } else { Ok(None) };
+                let mut out_bytes = stdout_handle
+                    .and_then(|h| h.join().ok())
+                    .unwrap_or_default();
+                let err_bytes = stderr_handle
+                    .and_then(|h| h.join().ok())
+                    .unwrap_or_default();
+                if combine {
+                    out_bytes.extend_from_slice(&err_bytes);
+                }
+                return if status.success() {
+                    Ok(Some(out_bytes))
+                } else {
+                    Ok(None)
+                };
             }
             Ok(None) => {
                 if is_cancelled() {
@@ -1436,11 +1566,17 @@ fn run_cancellable_capture_impl(mut cmd: Command, combine: bool) -> Result<Optio
                     // NFS). Join them with a timeout: spawn a joiner thread and give it 3 s.
                     let join_with_timeout = |h: std::thread::JoinHandle<Vec<u8>>| {
                         let (tx, rx) = std::sync::mpsc::channel();
-                        std::thread::spawn(move || { let _ = tx.send(h.join()); });
+                        std::thread::spawn(move || {
+                            let _ = tx.send(h.join());
+                        });
                         let _ = rx.recv_timeout(Duration::from_secs(3));
                     };
-                    if let Some(h) = stdout_handle { join_with_timeout(h); }
-                    if let Some(h) = stderr_handle { join_with_timeout(h); }
+                    if let Some(h) = stdout_handle {
+                        join_with_timeout(h);
+                    }
+                    if let Some(h) = stderr_handle {
+                        join_with_timeout(h);
+                    }
                     return Err("Cancelled".to_string());
                 }
                 std::thread::sleep(Duration::from_millis(200));
@@ -1492,15 +1628,21 @@ fn get_tool_version(bin: &Path, flag: &str) -> String {
             .unwrap_or_else(|| "unknown".to_string());
         let _ = tx.send(result);
     });
-    rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| "unknown(timeout)".to_string())
+    rx.recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| "unknown(timeout)".to_string())
 }
 
 fn make_log_stdio(log_dir: &Path, name: &str) -> Result<(Stdio, Stdio), String> {
     let log_path = log_dir.join(format!("{name}.log"));
     // Append mode: preserves the previous run's log on re-run so failure evidence is not lost.
-    match std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
         Ok(f) => {
-            let f2 = f.try_clone()
+            let f2 = f
+                .try_clone()
                 .map_err(|e| format!("Failed to clone log file handle: {e}"))?;
             Ok((Stdio::from(f), Stdio::from(f2)))
         }
@@ -1599,8 +1741,7 @@ fn spawn_star_progress_watcher(
                         if line.contains("Finished 1st pass mapping") {
                             saw_pass1_finish = true;
                         }
-                        if line.contains("Finished inserting junction indices")
-                            && saw_pass1_finish
+                        if line.contains("Finished inserting junction indices") && saw_pass1_finish
                         {
                             saw_pass2_junctions_done = true;
                         }
@@ -1629,7 +1770,10 @@ fn spawn_star_progress_watcher(
                             in_pass2 = false; // will flip on next "Started" in Log.out
                             pass1_actual_lines = Some(data_lines);
                         } else if trimmed.starts_with("Started 2nd pass")
-                            || (saw_pass1_finish && !in_pass2 && data_lines > 0 && trimmed.contains("Started"))
+                            || (saw_pass1_finish
+                                && !in_pass2
+                                && data_lines > 0
+                                && trimmed.contains("Started"))
                         {
                             in_pass2 = true;
                             pass2_data_lines = 0;
@@ -1669,11 +1813,15 @@ fn spawn_star_progress_watcher(
                 50
             } else if saw_pass1_finish {
                 // 40–50%: junction insertion / pass 2 prep
-                if saw_pass2_junctions_done { 50 } else { 42 }
+                if saw_pass2_junctions_done {
+                    50
+                } else {
+                    42
+                }
             } else if saw_pass1_start {
                 // 5–40%: 1st pass mapping
-                let pass1_lines = if pass1_actual_lines.is_some() {
-                    pass1_actual_lines.unwrap()
+                let pass1_lines = if let Some(lines) = pass1_actual_lines {
+                    lines
                 } else {
                     data_lines
                 };
@@ -1735,11 +1883,9 @@ fn run_star_sample(
     let star_dir = config.output_dir.join("star");
     let log_dir = config.output_dir.join("logs");
 
-    let bam_path = star_dir.join(format!(
-        "{}_Aligned.sortedByCoord.out.bam",
-        sample.name
-    ));
-    let out_prefix = star_dir.join(format!("{}_", sample.name))
+    let bam_path = star_dir.join(format!("{}_Aligned.sortedByCoord.out.bam", sample.name));
+    let out_prefix = star_dir
+        .join(format!("{}_", sample.name))
         .to_str()
         .ok_or_else(|| format!("{}: output path is not valid UTF-8", sample.name))?
         .to_string();
@@ -1754,20 +1900,31 @@ fn run_star_sample(
         {
             if bam_path.exists() {
                 let bam_size = fs::metadata(&bam_path).map(|m| m.len()).unwrap_or(0);
-                state.add_event(format!("  WARN  {} — removing existing BAM ({}B) before re-alignment", sample.name, bam_size));
+                state.add_event(format!(
+                    "  WARN  {} — removing existing BAM ({}B) before re-alignment",
+                    sample.name, bam_size
+                ));
                 cleanup_partial_star(&star_dir, &sample.name);
             }
             let star_bin = star_bin_path(config);
             let (stdout_cfg, stderr_cfg) =
                 make_log_stdio(&log_dir, &format!("{}.star", sample.name))?;
 
-            let genome_dir_str = config.genome_dir.to_str()
+            let genome_dir_str = config
+                .genome_dir
+                .to_str()
                 .ok_or_else(|| format!("{}: genome-dir path is not valid UTF-8", sample.name))?;
-            let r1_str = sample.r1.to_str()
+            let r1_str = sample
+                .r1
+                .to_str()
                 .ok_or_else(|| format!("{}: R1 path is not valid UTF-8", sample.name))?;
-            let r2_str = sample.r2.to_str()
+            let r2_str = sample
+                .r2
+                .to_str()
                 .ok_or_else(|| format!("{}: R2 path is not valid UTF-8", sample.name))?;
-            let gtf_str = config.gtf.to_str()
+            let gtf_str = config
+                .gtf
+                .to_str()
                 .ok_or_else(|| format!("{}: GTF path is not valid UTF-8", sample.name))?;
 
             let mut cmd = Command::new(&star_bin);
@@ -1854,15 +2011,13 @@ fn run_star_sample(
             let sync_done2 = Arc::clone(&sync_done);
             let star_result = std::thread::scope(|scope| {
                 let label_ref = &step_label;
-                scope.spawn(move || {
-                    loop {
-                        if sync_done2.load(Ordering::Relaxed) || CANCELLED.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(200));
-                        if let Ok(label) = label_ref.lock() {
-                            state.update_step(slot, &label);
-                        }
+                scope.spawn(move || loop {
+                    if sync_done2.load(Ordering::Relaxed) || CANCELLED.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                    if let Ok(label) = label_ref.lock() {
+                        state.update_step(slot, &label);
                     }
                 });
                 let result = run_cancellable(cmd);
@@ -1898,8 +2053,15 @@ fn run_star_sample(
 
     // ── Verify BAM ──
     if !config.skip_alignment && !bam_path.exists() {
-        state.add_event(format!("  FAIL  {} — BAM not found after alignment", sample.name));
-        return Err(format!("{}: BAM not found: {}", sample.name, bam_path.display()));
+        state.add_event(format!(
+            "  FAIL  {} — BAM not found after alignment",
+            sample.name
+        ));
+        return Err(format!(
+            "{}: BAM not found: {}",
+            sample.name,
+            bam_path.display()
+        ));
     }
 
     // ── Step 2: samtools index ──
@@ -1907,21 +2069,32 @@ fn run_star_sample(
     // If no BAM is present, skip indexing silently (downstream phases will
     // filter this sample out via the BAM existence check in Phase 2).
     if !bam_path.exists() {
-        state.add_event(format!("  SKIP  {} — no BAM present, skipping samtools index", sample.name));
+        state.add_event(format!(
+            "  SKIP  {} — no BAM present, skipping samtools index",
+            sample.name
+        ));
         return Ok(());
     }
     state.update_step(slot, "samtools index");
     let bai_path = PathBuf::from(format!("{}.bai", bam_path.display()));
     // Treat a zero-byte BAI as absent — it means a previous index attempt crashed
     let bai_valid = bai_path.exists()
-        && fs::metadata(&bai_path).map(|m| m.len() > 0).unwrap_or(false);
+        && fs::metadata(&bai_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
     if !bai_valid {
-        let bam_str = bam_path.to_str()
+        let bam_str = bam_path
+            .to_str()
             .ok_or_else(|| format!("{}: BAM path is not valid UTF-8", sample.name))?;
         let (stdout_cfg, stderr_cfg) =
             make_log_stdio(&log_dir, &format!("{}.samtools", sample.name))?;
         let mut cmd = Command::new(&config.samtools);
-        cmd.args(["index", "-@", &config.threads_per_sample.to_string(), bam_str]);
+        cmd.args([
+            "index",
+            "-@",
+            &config.threads_per_sample.to_string(),
+            bam_str,
+        ]);
         cmd.stdout(stdout_cfg).stderr(stderr_cfg);
 
         match run_cancellable(cmd) {
@@ -1947,15 +2120,16 @@ fn run_star_sample(
             .output();
         if let Ok(hdr) = bam_hdr {
             let hdr_str = String::from_utf8_lossy(&hdr.stdout);
-            let bam_has_chr = hdr_str.lines().any(|l| {
-                l.starts_with("@SQ") && l.contains("\tSN:chr")
-            });
+            let bam_has_chr = hdr_str
+                .lines()
+                .any(|l| l.starts_with("@SQ") && l.contains("\tSN:chr"));
             // Sample just the first data line in BED12
-            let bed_has_chr = File::open(bed_path).ok()
+            let bed_has_chr = File::open(bed_path)
+                .ok()
                 .and_then(|f| {
-                    BufReader::new(f).lines().find_map(|l| {
-                        l.ok().filter(|s| !s.is_empty() && !s.starts_with('#'))
-                    })
+                    BufReader::new(f)
+                        .lines()
+                        .find_map(|l| l.ok().filter(|s| !s.is_empty() && !s.starts_with('#')))
                 })
                 .map(|l| l.starts_with("chr"))
                 .unwrap_or(false);
@@ -1989,18 +2163,24 @@ fn run_deeptools_phase(
 
     let star_dir = config.output_dir.join("star");
     let bam_path = star_dir.join(format!("{}_Aligned.sortedByCoord.out.bam", sample.name));
-    let bw_path = config.output_dir.join("bigwig").join(format!("{}.bw", sample.name));
+    let bw_path = config
+        .output_dir
+        .join("bigwig")
+        .join(format!("{}.bw", sample.name));
 
     // bamCoverage requires a BAM index (.bai). Assert it exists with a clear diagnostic
     // so --skip-alignment users get an actionable error rather than a cryptic bamCoverage failure.
     let bai_path = PathBuf::from(format!("{}.bai", bam_path.display()));
     let bai_valid = bai_path.exists()
-        && fs::metadata(&bai_path).map(|m| m.len() > 0).unwrap_or(false);
+        && fs::metadata(&bai_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
     if !bai_valid {
         return Err(format!(
             "{}: BAM index ({}) is missing or empty — bamCoverage requires a .bai index.\n\
              Run samtools index on the BAM first, or re-run without --skip-alignment.",
-            sample.name, bai_path.display()
+            sample.name,
+            bai_path.display()
         ));
     }
 
@@ -2015,18 +2195,24 @@ fn run_deeptools_phase(
     state.set_active(slot, &sample.name, "bamCoverage (BAM -> bigwig)");
     let log_dir = config.output_dir.join("logs");
     let bam_coverage = bam_coverage_path(config);
-    let bam_str = bam_path.to_str()
+    let bam_str = bam_path
+        .to_str()
         .ok_or_else(|| format!("{}: BAM path is not valid UTF-8", sample.name))?;
-    let bw_str = bw_path.to_str()
+    let bw_str = bw_path
+        .to_str()
         .ok_or_else(|| format!("{}: bigwig path is not valid UTF-8", sample.name))?;
     let (stdout_cfg, stderr_cfg) =
         make_log_stdio(&log_dir, &format!("{}.bamcoverage", sample.name))?;
     let mut cmd = Command::new(&bam_coverage);
     cmd.args([
-        "-b", bam_str,
-        "-o", bw_str,
-        "-p", &config.threads_per_sample.to_string(),
-        "--binSize", "10",
+        "-b",
+        bam_str,
+        "-o",
+        bw_str,
+        "-p",
+        &config.threads_per_sample.to_string(),
+        "--binSize",
+        "10",
     ]);
     cmd.stdout(stdout_cfg).stderr(stderr_cfg);
 
@@ -2038,7 +2224,10 @@ fn run_deeptools_phase(
         }
         Ok(false) => {
             let _ = fs::remove_file(&bw_path);
-            state.add_event(format!("  FAIL  {} — bamCoverage exited non-zero", sample.name));
+            state.add_event(format!(
+                "  FAIL  {} — bamCoverage exited non-zero",
+                sample.name
+            ));
             Err(format!("{}: bamCoverage exited with error", sample.name))
         }
         Err(e) if e == "Cancelled" => {
@@ -2070,7 +2259,10 @@ fn run_rseqc_phase3(
     let star_dir = config.output_dir.join("star");
     let qc_dir = config.output_dir.join("qc");
     let bam_path = star_dir.join(format!("{}_Aligned.sortedByCoord.out.bam", sample.name));
-    let bw_path = config.output_dir.join("bigwig").join(format!("{}.bw", sample.name));
+    let bw_path = config
+        .output_dir
+        .join("bigwig")
+        .join(format!("{}.bw", sample.name));
 
     let strand_out = qc_dir.join(format!("{}.strand.txt", sample.name));
     let rdist_out = qc_dir.join(format!("{}.read_distribution.txt", sample.name));
@@ -2081,11 +2273,20 @@ fn run_rseqc_phase3(
     let skip_genebody = is_step_done(&config.output_dir, &sample.name, STEP_GENEBODY);
 
     if skip_infer && skip_rdist && skip_genebody {
-        state.add_event(format!("  SKIP  {} — all RSeQC sub-tools already valid", sample.name));
+        state.add_event(format!(
+            "  SKIP  {} — all RSeQC sub-tools already valid",
+            sample.name
+        ));
         // Count skipped sub-tools as done for progress tracking
-        if skip_infer { overall.inc_p3_sub_done(0); }
-        if skip_rdist { overall.inc_p3_sub_done(1); }
-        if skip_genebody { overall.inc_p3_sub_done(2); }
+        if skip_infer {
+            overall.inc_p3_sub_done(0);
+        }
+        if skip_rdist {
+            overall.inc_p3_sub_done(1);
+        }
+        if skip_genebody {
+            overall.inc_p3_sub_done(2);
+        }
         return Ok(());
     }
 
@@ -2094,8 +2295,16 @@ fn run_rseqc_phase3(
         let active_label = [
             if skip_infer { None } else { Some("infer") },
             if skip_rdist { None } else { Some("read_dist") },
-            if skip_genebody { None } else { Some("geneBody_coverage2") },
-        ].iter().filter_map(|x| *x).collect::<Vec<_>>().join(" + ");
+            if skip_genebody {
+                None
+            } else {
+                Some("geneBody_coverage2")
+            },
+        ]
+        .iter()
+        .filter_map(|x| *x)
+        .collect::<Vec<_>>()
+        .join(" + ");
         state.set_active(slot, &sample.name, &active_label);
 
         let t_start = Instant::now();
@@ -2105,16 +2314,20 @@ fn run_rseqc_phase3(
         let genebody_failed = Arc::new(AtomicBool::new(false));
 
         // Pre-compute UTF-8 path strings before entering thread::scope
-        let bam_str = bam_path.to_str()
+        let bam_str = bam_path
+            .to_str()
             .ok_or_else(|| format!("{}: BAM path is not valid UTF-8", sample.name))?
             .to_string();
-        let bed_str = bed_path.to_str()
+        let bed_str = bed_path
+            .to_str()
             .ok_or_else(|| format!("{}: BED path is not valid UTF-8", sample.name))?
             .to_string();
-        let bw_str = bw_path.to_str()
+        let bw_str = bw_path
+            .to_str()
             .ok_or_else(|| format!("{}: bigwig path is not valid UTF-8", sample.name))?
             .to_string();
-        let genebody_prefix = qc_dir.join(&sample.name)
+        let genebody_prefix = qc_dir
+            .join(&sample.name)
             .to_str()
             .ok_or_else(|| format!("{}: QC prefix path is not valid UTF-8", sample.name))?
             .to_string();
@@ -2128,135 +2341,189 @@ fn run_rseqc_phase3(
                 // infer_experiment.py
                 let t_infer = s.spawn(|| {
                     if skip_infer {
-                        state.add_event(format!("  SKIP  {} — infer_experiment (checkpoint valid)", sample.name));
+                        state.add_event(format!(
+                            "  SKIP  {} — infer_experiment (checkpoint valid)",
+                            sample.name
+                        ));
                         return;
                     }
                     let script = rseqc_script_path(config, "infer_experiment.py");
-                        let script_str = match script.to_str() {
-                            Some(s) => s.to_string(),
-                            None => {
+                    let script_str = match script.to_str() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            infer_failed.store(true, Ordering::SeqCst);
+                            state.add_event(format!(
+                                "  FAIL  {} — infer_experiment script path is not valid UTF-8",
+                                sample.name
+                            ));
+                            return;
+                        }
+                    };
+                    let mut cmd = Command::new(&rseqc_python);
+                    cmd.args([
+                        script_str.as_str(),
+                        "-i",
+                        bam_str.as_str(),
+                        "-r",
+                        bed_str.as_str(),
+                    ]);
+                    // infer_experiment.py writes results to stderr; capture both streams.
+                    match run_cancellable_capture_combined(cmd) {
+                        Ok(Some(combined)) => {
+                            if let Err(e) = atomic_write(&strand_out, &combined) {
+                                state.add_event(format!(
+                                    "  FAIL  {} — infer_experiment write failed: {e}",
+                                    sample.name
+                                ));
                                 infer_failed.store(true, Ordering::SeqCst);
-                                state.add_event(format!("  FAIL  {} — infer_experiment script path is not valid UTF-8", sample.name));
-                                return;
-                            }
-                        };
-                        let mut cmd = Command::new(&rseqc_python);
-                        cmd.args([
-                            script_str.as_str(),
-                            "-i", bam_str.as_str(),
-                            "-r", bed_str.as_str(),
-                        ]);
-                        // infer_experiment.py writes results to stderr; capture both streams.
-                        match run_cancellable_capture_combined(cmd) {
-                            Ok(Some(combined)) => {
-                                if let Err(e) = atomic_write(&strand_out, &combined) {
-                                    state.add_event(format!("  FAIL  {} — infer_experiment write failed: {e}", sample.name));
-                                    infer_failed.store(true, Ordering::SeqCst);
-                                } else {
-                                    state.add_event(format!("  DONE  {} — infer_experiment", sample.name));
-                                }
-                            }
-                            Ok(None) => {
-                                infer_failed.store(true, Ordering::SeqCst);
-                                state.add_event(format!("  FAIL  {} — infer_experiment exited non-zero", sample.name));
-                            }
-                            Err(e) if e == "Cancelled" => {}
-                            Err(e) => {
-                                infer_failed.store(true, Ordering::SeqCst);
-                                state.add_event(format!("  FAIL  {} — infer_experiment: {e}", sample.name));
+                            } else {
+                                state.add_event(format!(
+                                    "  DONE  {} — infer_experiment",
+                                    sample.name
+                                ));
                             }
                         }
+                        Ok(None) => {
+                            infer_failed.store(true, Ordering::SeqCst);
+                            state.add_event(format!(
+                                "  FAIL  {} — infer_experiment exited non-zero",
+                                sample.name
+                            ));
+                        }
+                        Err(e) if e == "Cancelled" => {}
+                        Err(e) => {
+                            infer_failed.store(true, Ordering::SeqCst);
+                            state.add_event(format!(
+                                "  FAIL  {} — infer_experiment: {e}",
+                                sample.name
+                            ));
+                        }
+                    }
                 });
 
                 // read_distribution.py
                 let t_rdist = s.spawn(|| {
                     if skip_rdist {
-                        state.add_event(format!("  SKIP  {} — read_distribution (checkpoint valid)", sample.name));
+                        state.add_event(format!(
+                            "  SKIP  {} — read_distribution (checkpoint valid)",
+                            sample.name
+                        ));
                         return;
                     }
                     let script = rseqc_script_path(config, "read_distribution.py");
-                        let script_str = match script.to_str() {
-                            Some(s) => s.to_string(),
-                            None => {
+                    let script_str = match script.to_str() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            rdist_failed.store(true, Ordering::SeqCst);
+                            state.add_event(format!(
+                                "  FAIL  {} — read_distribution script path is not valid UTF-8",
+                                sample.name
+                            ));
+                            return;
+                        }
+                    };
+                    let mut cmd = Command::new(&rseqc_python);
+                    cmd.args([
+                        script_str.as_str(),
+                        "-i",
+                        bam_str.as_str(),
+                        "-r",
+                        bed_str.as_str(),
+                    ]);
+                    match run_cancellable_capture(cmd) {
+                        Ok(Some(stdout)) => {
+                            if let Err(e) = atomic_write(&rdist_out, &stdout) {
+                                state.add_event(format!(
+                                    "  FAIL  {} — read_distribution write failed: {e}",
+                                    sample.name
+                                ));
                                 rdist_failed.store(true, Ordering::SeqCst);
-                                state.add_event(format!("  FAIL  {} — read_distribution script path is not valid UTF-8", sample.name));
-                                return;
-                            }
-                        };
-                        let mut cmd = Command::new(&rseqc_python);
-                        cmd.args([
-                            script_str.as_str(),
-                            "-i", bam_str.as_str(),
-                            "-r", bed_str.as_str(),
-                        ]);
-                        match run_cancellable_capture(cmd) {
-                            Ok(Some(stdout)) => {
-                                if let Err(e) = atomic_write(&rdist_out, &stdout) {
-                                    state.add_event(format!("  FAIL  {} — read_distribution write failed: {e}", sample.name));
-                                    rdist_failed.store(true, Ordering::SeqCst);
-                                } else {
-                                    state.add_event(format!("  DONE  {} — read_distribution", sample.name));
-                                }
-                            }
-                            Ok(None) => {
-                                rdist_failed.store(true, Ordering::SeqCst);
-                                state.add_event(format!("  FAIL  {} — read_distribution exited non-zero", sample.name));
-                            }
-                            Err(e) if e == "Cancelled" => {}
-                            Err(e) => {
-                                rdist_failed.store(true, Ordering::SeqCst);
-                                state.add_event(format!("  FAIL  {} — read_distribution: {e}", sample.name));
+                            } else {
+                                state.add_event(format!(
+                                    "  DONE  {} — read_distribution",
+                                    sample.name
+                                ));
                             }
                         }
+                        Ok(None) => {
+                            rdist_failed.store(true, Ordering::SeqCst);
+                            state.add_event(format!(
+                                "  FAIL  {} — read_distribution exited non-zero",
+                                sample.name
+                            ));
+                        }
+                        Err(e) if e == "Cancelled" => {}
+                        Err(e) => {
+                            rdist_failed.store(true, Ordering::SeqCst);
+                            state.add_event(format!(
+                                "  FAIL  {} — read_distribution: {e}",
+                                sample.name
+                            ));
+                        }
+                    }
                 });
 
                 // geneBody_coverage2.py (bigwig from Phase 2 is already present)
                 let t_genebody = s.spawn(|| {
                     if skip_genebody {
-                        state.add_event(format!("  SKIP  {} — geneBody_coverage2 (checkpoint valid)", sample.name));
+                        state.add_event(format!(
+                            "  SKIP  {} — geneBody_coverage2 (checkpoint valid)",
+                            sample.name
+                        ));
                         return;
                     }
                     let script = rseqc_script_path(config, "geneBody_coverage2.py");
-                        let script_str = match script.to_str() {
-                            Some(s) => s.to_string(),
-                            None => {
-                                genebody_failed.store(true, Ordering::SeqCst);
-                                state.add_event(format!("  FAIL  {} — geneBody_coverage2 script path is not valid UTF-8", sample.name));
-                                return;
-                            }
-                        };
-                        let log_dir = config.output_dir.join("logs");
-                        let (gb_stdout, gb_stderr) = match make_log_stdio(&log_dir, &format!("{}.genebody", sample.name)) {
+                    let script_str = match script.to_str() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            genebody_failed.store(true, Ordering::SeqCst);
+                            state.add_event(format!(
+                                "  FAIL  {} — geneBody_coverage2 script path is not valid UTF-8",
+                                sample.name
+                            ));
+                            return;
+                        }
+                    };
+                    let log_dir = config.output_dir.join("logs");
+                    let (gb_stdout, gb_stderr) =
+                        match make_log_stdio(&log_dir, &format!("{}.genebody", sample.name)) {
                             Ok(p) => p,
                             Err(e) => {
                                 genebody_failed.store(true, Ordering::SeqCst);
-                                state.add_event(format!("  FAIL  {} — geneBody_coverage2 log: {e}", sample.name));
+                                state.add_event(format!(
+                                    "  FAIL  {} — geneBody_coverage2 log: {e}",
+                                    sample.name
+                                ));
                                 return;
                             }
                         };
-                        let mut cmd = Command::new(&rseqc_python);
-                        cmd.args([
-                            script_str.as_str(),
-                            "-r", bed_str.as_str(),
-                            "-i", bw_str.as_str(),
-                            "-o", genebody_prefix.as_str(),
-                        ]);
-                        cmd.stdout(gb_stdout).stderr(gb_stderr);
-                        match run_cancellable(cmd) {
-                            Ok(true) => {
-                                state.add_event(format!("  DONE  {} — geneBody_coverage2", sample.name));
+                    let mut cmd = Command::new(&rseqc_python);
+                    cmd.args([
+                        script_str.as_str(),
+                        "-r",
+                        bed_str.as_str(),
+                        "-i",
+                        bw_str.as_str(),
+                        "-o",
+                        genebody_prefix.as_str(),
+                    ]);
+                    cmd.stdout(gb_stdout).stderr(gb_stderr);
+                    match run_cancellable(cmd) {
+                        Ok(true) => {
+                            state
+                                .add_event(format!("  DONE  {} — geneBody_coverage2", sample.name));
 
-                                // Generate ggplot2 PDF plots via inline R (no .r file artifacts).
-                                // Both are required outputs included in the genebody SHA256 checkpoint.
-                                {
-                                    let pfx = genebody_prefix.to_string();
-                                    let txt_file = format!("{pfx}.geneBodyCoverage.txt");
-                                    let mut pdf_ok = true;
+                            // Generate ggplot2 PDF plots via inline R (no .r file artifacts).
+                            // Both are required outputs included in the genebody SHA256 checkpoint.
+                            {
+                                let pfx = genebody_prefix.to_string();
+                                let txt_file = format!("{pfx}.geneBodyCoverage.txt");
+                                let mut pdf_ok = true;
 
-                                    // Curves plot
-                                    let curves_pdf = format!("{pfx}.geneBodyCoverage.curves.pdf");
-                                    let curves_r = format!(
-                                        r#"tryCatch({{
+                                // Curves plot
+                                let curves_pdf = format!("{pfx}.geneBodyCoverage.curves.pdf");
+                                let curves_r = format!(
+                                    r#"tryCatch({{
   if (!require('ggplot2', quietly=TRUE)) stop('ggplot2 package required')
   data <- read.table('{input}', header=TRUE, sep='\t')
   if (nrow(data) == 0) stop('Input file is empty')
@@ -2277,27 +2544,37 @@ fn run_rseqc_phase3(
   quit(status=1)
 }})
 "#,
-                                        input = txt_file, output = curves_pdf
-                                    );
-                                    match run_inline_r(&curves_r) {
-                                        Ok(_) => match validate_pdf_created(&curves_pdf) {
-                                            Ok(_) => state.add_event(format!("  DONE  {} — geneBodyCoverage curves plot", sample.name)),
-                                            Err(e) => {
-                                                state.add_event(format!("  FAIL  {} — curves PDF validation: {e}", sample.name));
-                                                pdf_ok = false;
-                                            }
-                                        },
-                                        Err(e) if e == "Cancelled" => {}
+                                    input = txt_file,
+                                    output = curves_pdf
+                                );
+                                match run_inline_r(&curves_r) {
+                                    Ok(_) => match validate_pdf_created(&curves_pdf) {
+                                        Ok(_) => state.add_event(format!(
+                                            "  DONE  {} — geneBodyCoverage curves plot",
+                                            sample.name
+                                        )),
                                         Err(e) => {
-                                            state.add_event(format!("  FAIL  {} — geneBodyCoverage curves plot: {e}", sample.name));
+                                            state.add_event(format!(
+                                                "  FAIL  {} — curves PDF validation: {e}",
+                                                sample.name
+                                            ));
                                             pdf_ok = false;
                                         }
+                                    },
+                                    Err(e) if e == "Cancelled" => {}
+                                    Err(e) => {
+                                        state.add_event(format!(
+                                            "  FAIL  {} — geneBodyCoverage curves plot: {e}",
+                                            sample.name
+                                        ));
+                                        pdf_ok = false;
                                     }
+                                }
 
-                                    // Heatmap plot
-                                    let heatmap_pdf = format!("{pfx}.geneBodyCoverage.heatMap.pdf");
-                                    let heatmap_r = format!(
-                                        r#"tryCatch({{
+                                // Heatmap plot
+                                let heatmap_pdf = format!("{pfx}.geneBodyCoverage.heatMap.pdf");
+                                let heatmap_r = format!(
+                                    r#"tryCatch({{
   if (!require('ggplot2', quietly=TRUE)) stop('ggplot2 package required')
   data <- read.table('{input}', header=TRUE, sep='\t')
   if (nrow(data) == 0) stop('Input file is empty')
@@ -2322,38 +2599,54 @@ fn run_rseqc_phase3(
   quit(status=1)
 }})
 "#,
-                                        input = txt_file, output = heatmap_pdf
-                                    );
-                                    match run_inline_r(&heatmap_r) {
-                                        Ok(_) => match validate_pdf_created(&heatmap_pdf) {
-                                            Ok(_) => state.add_event(format!("  DONE  {} — geneBodyCoverage heatmap plot", sample.name)),
-                                            Err(e) => {
-                                                state.add_event(format!("  FAIL  {} — heatmap PDF validation: {e}", sample.name));
-                                                pdf_ok = false;
-                                            }
-                                        },
-                                        Err(e) if e == "Cancelled" => {}
+                                    input = txt_file,
+                                    output = heatmap_pdf
+                                );
+                                match run_inline_r(&heatmap_r) {
+                                    Ok(_) => match validate_pdf_created(&heatmap_pdf) {
+                                        Ok(_) => state.add_event(format!(
+                                            "  DONE  {} — geneBodyCoverage heatmap plot",
+                                            sample.name
+                                        )),
                                         Err(e) => {
-                                            state.add_event(format!("  FAIL  {} — geneBodyCoverage heatmap plot: {e}", sample.name));
+                                            state.add_event(format!(
+                                                "  FAIL  {} — heatmap PDF validation: {e}",
+                                                sample.name
+                                            ));
                                             pdf_ok = false;
                                         }
-                                    }
-
-                                    if !pdf_ok {
-                                        genebody_failed.store(true, Ordering::SeqCst);
+                                    },
+                                    Err(e) if e == "Cancelled" => {}
+                                    Err(e) => {
+                                        state.add_event(format!(
+                                            "  FAIL  {} — geneBodyCoverage heatmap plot: {e}",
+                                            sample.name
+                                        ));
+                                        pdf_ok = false;
                                     }
                                 }
-                            }
-                            Ok(false) => {
-                                genebody_failed.store(true, Ordering::SeqCst);
-                                state.add_event(format!("  FAIL  {} — geneBody_coverage2 exited non-zero", sample.name));
-                            }
-                            Err(e) if e == "Cancelled" => {}
-                            Err(e) => {
-                                genebody_failed.store(true, Ordering::SeqCst);
-                                state.add_event(format!("  FAIL  {} — geneBody_coverage2: {e}", sample.name));
+
+                                if !pdf_ok {
+                                    genebody_failed.store(true, Ordering::SeqCst);
+                                }
                             }
                         }
+                        Ok(false) => {
+                            genebody_failed.store(true, Ordering::SeqCst);
+                            state.add_event(format!(
+                                "  FAIL  {} — geneBody_coverage2 exited non-zero",
+                                sample.name
+                            ));
+                        }
+                        Err(e) if e == "Cancelled" => {}
+                        Err(e) => {
+                            genebody_failed.store(true, Ordering::SeqCst);
+                            state.add_event(format!(
+                                "  FAIL  {} — geneBody_coverage2: {e}",
+                                sample.name
+                            ));
+                        }
+                    }
                 });
 
                 let _ = (t_infer.join(), t_rdist.join(), t_genebody.join());
@@ -2364,8 +2657,12 @@ fn run_rseqc_phase3(
 
         // On cancellation: clean up only partial outputs from tools that were running
         if is_cancelled() {
-            if !skip_infer { let _ = fs::remove_file(&strand_out); }
-            if !skip_rdist { let _ = fs::remove_file(&rdist_out); }
+            if !skip_infer {
+                let _ = fs::remove_file(&strand_out);
+            }
+            if !skip_rdist {
+                let _ = fs::remove_file(&rdist_out);
+            }
             if !skip_genebody {
                 for suffix in &[
                     ".geneBodyCoverage.txt",
@@ -2395,7 +2692,10 @@ fn run_rseqc_phase3(
             overall.inc_p3_sub_done(0);
         } else {
             if let Err(e) = write_step_checkpoint(&config.output_dir, &sample.name, STEP_INFER) {
-                state.add_event(format!("  FAIL  {} — infer checkpoint write: {e}", sample.name));
+                state.add_event(format!(
+                    "  FAIL  {} — infer checkpoint write: {e}",
+                    sample.name
+                ));
                 failed_tools.push("infer_experiment(checkpoint)");
             }
             overall.inc_p3_sub_done(0);
@@ -2410,7 +2710,10 @@ fn run_rseqc_phase3(
             overall.inc_p3_sub_done(1);
         } else {
             if let Err(e) = write_step_checkpoint(&config.output_dir, &sample.name, STEP_RDIST) {
-                state.add_event(format!("  FAIL  {} — rdist checkpoint write: {e}", sample.name));
+                state.add_event(format!(
+                    "  FAIL  {} — rdist checkpoint write: {e}",
+                    sample.name
+                ));
                 failed_tools.push("read_distribution(checkpoint)");
             }
             overall.inc_p3_sub_done(1);
@@ -2433,14 +2736,21 @@ fn run_rseqc_phase3(
             overall.inc_p3_sub_done(2);
         } else {
             if let Err(e) = write_step_checkpoint(&config.output_dir, &sample.name, STEP_GENEBODY) {
-                state.add_event(format!("  FAIL  {} — genebody checkpoint write: {e}", sample.name));
+                state.add_event(format!(
+                    "  FAIL  {} — genebody checkpoint write: {e}",
+                    sample.name
+                ));
                 failed_tools.push("geneBody_coverage2(checkpoint)");
             }
             overall.inc_p3_sub_done(2);
         }
 
         if !failed_tools.is_empty() {
-            return Err(format!("{}: failed tools: {}", sample.name, failed_tools.join(", ")));
+            return Err(format!(
+                "{}: failed tools: {}",
+                sample.name,
+                failed_tools.join(", ")
+            ));
         }
     }
 
@@ -2466,8 +2776,11 @@ fn cleanup_partial_star(star_dir: &Path, sample_name: &str) {
         let path = star_dir.join(format!("{sample_name}{suffix}"));
         if path.exists() {
             if let Err(e) = fs::remove_file(&path) {
-                eprintln!("WARNING: could not remove partial STAR output {}: {e} \
-                    — manual removal may be needed to avoid stale data", path.display());
+                eprintln!(
+                    "WARNING: could not remove partial STAR output {}: {e} \
+                    — manual removal may be needed to avoid stale data",
+                    path.display()
+                );
             }
         }
     }
@@ -2482,7 +2795,10 @@ fn cleanup_partial_star(star_dir: &Path, sample_name: &str) {
     // Glob for any _STARtmp* directories (version-dependent suffixes).
     // SAFETY: sample_name is validated in discover_samples to [A-Za-z0-9_.-] so it
     // contains no glob metacharacters; the pattern is safe to pass to glob::glob.
-    let tmp_pattern = star_dir.join(format!("{sample_name}_STARtmp*")).to_string_lossy().to_string();
+    let tmp_pattern = star_dir
+        .join(format!("{sample_name}_STARtmp*"))
+        .to_string_lossy()
+        .to_string();
     if let Ok(entries) = glob::glob(&tmp_pattern) {
         for entry in entries.flatten() {
             if entry.is_dir() {
@@ -2497,7 +2813,10 @@ fn cleanup_partial_deeptools(output_dir: &Path, sample_name: &str) {
     let bw_path = output_dir.join("bigwig").join(format!("{sample_name}.bw"));
     if bw_path.exists() {
         if let Err(e) = fs::remove_file(&bw_path) {
-            eprintln!("WARNING: could not remove partial bigwig {}: {e}", bw_path.display());
+            eprintln!(
+                "WARNING: could not remove partial bigwig {}: {e}",
+                bw_path.display()
+            );
         }
     }
 }
@@ -2518,7 +2837,10 @@ fn cleanup_partial_rseqc(output_dir: &Path, sample_name: &str) {
         let path = qc_dir.join(format!("{sample_name}{suffix}"));
         if path.exists() {
             if let Err(e) = fs::remove_file(&path) {
-                eprintln!("WARNING: could not remove partial QC output {}: {e}", path.display());
+                eprintln!(
+                    "WARNING: could not remove partial QC output {}: {e}",
+                    path.display()
+                );
             }
         }
     }
@@ -2527,11 +2849,7 @@ fn cleanup_partial_rseqc(output_dir: &Path, sample_name: &str) {
 // ─── TUI snapshot builder ────────────────────────────────────────────────────
 
 #[cfg(feature = "tui")]
-fn build_snapshot(
-    state: &ProgressState,
-    _parallel_jobs: usize,
-    resumed: usize,
-) -> RenderSnapshot {
+fn build_snapshot(state: &ProgressState, _parallel_jobs: usize, resumed: usize) -> RenderSnapshot {
     let elapsed = state.start_time.elapsed();
     let done = state.done_count();
     let total = state.total;
@@ -2569,26 +2887,33 @@ fn build_snapshot(
         .unwrap_or_default();
 
     // Overall progress
-    let (overall_frac, overall_phase, overall_total_phases, overall_done, overall_total, overall_elapsed, p3_frac) =
-        if let Some(ref overall) = state.overall {
-            let current = overall.current_phase.load(Ordering::Relaxed);
-            let p3f = if current == 3 {
-                Some(overall.p3_weighted_frac())
-            } else {
-                None
-            };
-            (
-                overall.weighted_frac(),
-                current,
-                overall.total_phases,
-                overall.total_done(),
-                overall.total_samples(),
-                overall.start_time.elapsed(),
-                p3f,
-            )
+    let (
+        overall_frac,
+        overall_phase,
+        overall_total_phases,
+        overall_done,
+        overall_total,
+        overall_elapsed,
+        p3_frac,
+    ) = if let Some(ref overall) = state.overall {
+        let current = overall.current_phase.load(Ordering::Relaxed);
+        let p3f = if current == 3 {
+            Some(overall.p3_weighted_frac())
         } else {
-            (0.0, 1, 1, 0, 0, elapsed, None)
+            None
         };
+        (
+            overall.weighted_frac(),
+            current,
+            overall.total_phases,
+            overall.total_done(),
+            overall.total_samples(),
+            overall.start_time.elapsed(),
+            p3f,
+        )
+    } else {
+        (0.0, 1, 1, 0, 0, elapsed, None)
+    };
 
     RenderSnapshot {
         done,
@@ -2624,7 +2949,12 @@ struct DisplayThread {
 
 #[cfg(feature = "tui")]
 impl DisplayThread {
-    fn start(state: Arc<ProgressState>, parallel_jobs: usize, resumed: usize, is_tty: bool) -> Self {
+    fn start(
+        state: Arc<ProgressState>,
+        parallel_jobs: usize,
+        resumed: usize,
+        is_tty: bool,
+    ) -> Self {
         let flag = Arc::new(AtomicBool::new(false));
         let display_flag = Arc::clone(&flag);
 
@@ -2638,14 +2968,13 @@ impl DisplayThread {
                     while event::poll(Duration::from_millis(0)).unwrap_or(false) {
                         match event::read() {
                             Ok(event::Event::Key(key)) => {
-                                if key.code == event::KeyCode::Char('c')
-                                    && key.modifiers.contains(event::KeyModifiers::CONTROL)
+                                if (key.code == event::KeyCode::Char('c')
+                                    && key.modifiers.contains(event::KeyModifiers::CONTROL))
+                                    || matches!(
+                                        key.code,
+                                        event::KeyCode::Char('q') | event::KeyCode::Char('Q')
+                                    )
                                 {
-                                    CANCELLED.store(true, Ordering::SeqCst);
-                                } else if matches!(
-                                    key.code,
-                                    event::KeyCode::Char('q') | event::KeyCode::Char('Q')
-                                ) {
                                     CANCELLED.store(true, Ordering::SeqCst);
                                 }
                             }
@@ -2659,14 +2988,15 @@ impl DisplayThread {
                     if force_clear {
                         // Queued into buffer — render() will do the actual flush
                         let mut clr = Vec::new();
-                        let _ = crossterm::queue!(clr,
+                        let _ = crossterm::queue!(
+                            clr,
                             terminal::Clear(terminal::ClearType::All),
                             cursor::MoveTo(0, 0)
                         );
                         let _ = out.write_all(&clr);
                     }
                     let snap = build_snapshot(&state, parallel_jobs, resumed);
-                    let blink_on = (snap.elapsed.as_millis() / 500) % 2 == 0;
+                    let blink_on = (snap.elapsed.as_millis() / 500).is_multiple_of(2);
                     tui::render(&mut out, &snap, parallel_jobs, blink_on);
                 } else if last_nontty_print.elapsed() >= Duration::from_secs(30) {
                     last_nontty_print = Instant::now();
@@ -2678,16 +3008,21 @@ impl DisplayThread {
                         "[{}] {} — {}/{} done, {} failed | active: {}",
                         elapsed_str,
                         snap.phase_label,
-                        snap.completed, snap.total,
+                        snap.completed,
+                        snap.total,
                         snap.failed,
-                        if active_names.is_empty() { "none".to_string() } else { active_names.join(", ") },
+                        if active_names.is_empty() {
+                            "none".to_string()
+                        } else {
+                            active_names.join(", ")
+                        },
                     );
                 }
 
                 if display_flag.load(Ordering::SeqCst) || is_cancelled() {
                     if is_tty {
                         let snap = build_snapshot(&state, parallel_jobs, resumed);
-                        let blink_on = (snap.elapsed.as_millis() / 500) % 2 == 0;
+                        let blink_on = (snap.elapsed.as_millis() / 500).is_multiple_of(2);
                         tui::render(&mut out, &snap, parallel_jobs, blink_on);
                     }
                     break;
@@ -2734,32 +3069,40 @@ struct DisplayThread {
 
 #[cfg(not(feature = "tui"))]
 impl DisplayThread {
-    fn start(state: Arc<ProgressState>, _parallel_jobs: usize, _resumed: usize, _is_tty: bool) -> Self {
+    fn start(
+        state: Arc<ProgressState>,
+        _parallel_jobs: usize,
+        _resumed: usize,
+        _is_tty: bool,
+    ) -> Self {
         let flag = Arc::new(AtomicBool::new(false));
         let display_flag = Arc::clone(&flag);
-        let handle = std::thread::spawn(move || {
-            loop {
-                if display_flag.load(Ordering::SeqCst) || is_cancelled() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_secs(30));
-                if display_flag.load(Ordering::SeqCst) || is_cancelled() {
-                    break;
-                }
-                let done = state.completed.load(Ordering::Relaxed);
-                let failed = state.failed.load(Ordering::Relaxed);
-                let total = state.total;
-                let elapsed = fmt_duration(state.start_time.elapsed());
-                let phase = state.phase_label.lock()
-                    .map(|l| l.clone())
-                    .unwrap_or_else(|e| e.into_inner().clone());
-                eprintln!(
-                    "[{}] {} — {}/{} done, {} failed",
-                    elapsed, phase, done, total, failed,
-                );
+        let handle = std::thread::spawn(move || loop {
+            if display_flag.load(Ordering::SeqCst) || is_cancelled() {
+                break;
             }
+            std::thread::sleep(Duration::from_secs(30));
+            if display_flag.load(Ordering::SeqCst) || is_cancelled() {
+                break;
+            }
+            let done = state.completed.load(Ordering::Relaxed);
+            let failed = state.failed.load(Ordering::Relaxed);
+            let total = state.total;
+            let elapsed = fmt_duration(state.start_time.elapsed());
+            let phase = state
+                .phase_label
+                .lock()
+                .map(|l| l.clone())
+                .unwrap_or_else(|e| e.into_inner().clone());
+            eprintln!(
+                "[{}] {} — {}/{} done, {} failed",
+                elapsed, phase, done, total, failed,
+            );
         });
-        Self { flag, handle: Some(handle) }
+        Self {
+            flag,
+            handle: Some(handle),
+        }
     }
 
     fn stop(&mut self) {
@@ -2791,23 +3134,21 @@ where
             let errs = &errors;
             let w = &worker;
             let st = &state;
-            s.spawn(move || {
-                loop {
-                    if is_cancelled() {
-                        break;
-                    }
-                    let idx = next.fetch_add(1, Ordering::Relaxed);
-                    if idx >= items.len() {
-                        break;
-                    }
-                    if let Err(e) = w(&items[idx], slot) {
-                        if e != "Cancelled" {
-                            errs.lock().unwrap_or_else(|e| e.into_inner()).push(e);
-                        }
-                    }
-                    st.clear_slot(slot);
-                    std::thread::yield_now();
+            s.spawn(move || loop {
+                if is_cancelled() {
+                    break;
                 }
+                let idx = next.fetch_add(1, Ordering::Relaxed);
+                if idx >= items.len() {
+                    break;
+                }
+                if let Err(e) = w(&items[idx], slot) {
+                    if e != "Cancelled" {
+                        errs.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+                    }
+                }
+                st.clear_slot(slot);
+                std::thread::yield_now();
             });
         }
     });
@@ -2828,16 +3169,18 @@ fn is_executable(p: &Path) -> bool {
 fn resolve_binary(bin: &Path) -> Option<PathBuf> {
     if bin.is_absolute() || bin.components().count() > 1 {
         // Explicit path — check directly
-        if is_executable(bin) { Some(bin.to_path_buf()) } else { None }
+        if is_executable(bin) {
+            Some(bin.to_path_buf())
+        } else {
+            None
+        }
     } else {
         // Bare name — search $PATH
-        env::var_os("PATH")
-            .map(|path_var| {
-                env::split_paths(&path_var)
-                    .map(|dir| dir.join(bin))
-                    .find(|p| is_executable(p))
-            })
-            .flatten()
+        env::var_os("PATH").and_then(|path_var| {
+            env::split_paths(&path_var)
+                .map(|dir| dir.join(bin))
+                .find(|p| is_executable(p))
+        })
     }
 }
 
@@ -2871,7 +3214,11 @@ fn parse_samtools_version(output: &str) -> Option<(u32, u32)> {
     let ver = line.strip_prefix("samtools ")?;
     let mut parts = ver.split('.');
     let major: u32 = parts.next()?.parse().ok()?;
-    let minor: u32 = parts.next()?.trim_end_matches(|c: char| !c.is_ascii_digit()).parse().ok()?;
+    let minor: u32 = parts
+        .next()?
+        .trim_end_matches(|c: char| !c.is_ascii_digit())
+        .parse()
+        .ok()?;
     Some((major, minor))
 }
 
@@ -2902,7 +3249,9 @@ fn validate_environment(config: &mut Config) -> Result<(), String> {
                 ));
             }
             None => {
-                eprintln!("WARNING: Could not parse samtools version — assuming it supports -@ (>= 1.12)");
+                eprintln!(
+                    "WARNING: Could not parse samtools version — assuming it supports -@ (>= 1.12)"
+                );
             }
         }
     }
@@ -3008,10 +3357,8 @@ fn validate_environment(config: &mut Config) -> Result<(), String> {
     }
 
     // zcat is required by STAR's --readFilesCommand
-    if !config.skip_alignment {
-        if resolve_binary(Path::new("zcat")).is_none() {
-            return Err("zcat not found in $PATH — required by STAR for gzip FASTQ decompression.\nInstall gzip or ensure zcat is in $PATH.".to_string());
-        }
+    if !config.skip_alignment && resolve_binary(Path::new("zcat")).is_none() {
+        return Err("zcat not found in $PATH — required by STAR for gzip FASTQ decompression.\nInstall gzip or ensure zcat is in $PATH.".to_string());
     }
 
     Ok(())
@@ -3041,15 +3388,18 @@ fn hash_fastq_inputs(samples: &[Sample]) -> Vec<FastqAuditEntry> {
                 format!("UNREADABLE:{e}")
             })
     };
-    samples.iter().map(|s| FastqAuditEntry {
-        sample: s.name.clone(),
-        r1: s.r1.display().to_string(),
-        r1_sha256: streaming_hex(&s.r1),
-        r1_bytes: fs::metadata(&s.r1).map(|m| m.len()).unwrap_or(0),
-        r2: s.r2.display().to_string(),
-        r2_sha256: streaming_hex(&s.r2),
-        r2_bytes: fs::metadata(&s.r2).map(|m| m.len()).unwrap_or(0),
-    }).collect()
+    samples
+        .iter()
+        .map(|s| FastqAuditEntry {
+            sample: s.name.clone(),
+            r1: s.r1.display().to_string(),
+            r1_sha256: streaming_hex(&s.r1),
+            r1_bytes: fs::metadata(&s.r1).map(|m| m.len()).unwrap_or(0),
+            r2: s.r2.display().to_string(),
+            r2_sha256: streaming_hex(&s.r2),
+            r2_bytes: fs::metadata(&s.r2).map(|m| m.len()).unwrap_or(0),
+        })
+        .collect()
 }
 
 /// Pre-computed reference file SHA256 hashes — computed in a background thread
@@ -3073,13 +3423,17 @@ fn write_run_info(
     ref_hashes: RefHashes,
 ) {
     // Software versions
-    let star_ver    = get_tool_version(&star_bin_path(config), "--version");
+    let star_ver = get_tool_version(&star_bin_path(config), "--version");
     let samtools_ver = get_tool_version(&config.samtools, "--version");
-    let bamcov_ver  = get_tool_version(&bam_coverage_path(config), "--version");
-    let python_ver  = get_tool_version(&rseqc_python_path(config), "--version");
-    let rseqc_ver   = get_tool_version(&rseqc_script_path(config, "infer_experiment.py"), "-v");
+    let bamcov_ver = get_tool_version(&bam_coverage_path(config), "--version");
+    let python_ver = get_tool_version(&rseqc_python_path(config), "--version");
+    let rseqc_ver = get_tool_version(&rseqc_script_path(config, "infer_experiment.py"), "-v");
 
-    let RefHashes { genome_params_sha256, gtf_sha256, bed_sha256 } = ref_hashes;
+    let RefHashes {
+        genome_params_sha256,
+        gtf_sha256,
+        bed_sha256,
+    } = ref_hashes;
 
     let command_line = std::env::args().collect::<Vec<_>>().join(" ");
 
@@ -3172,7 +3526,8 @@ fn write_run_info(
             // Also write run_info_latest.json so downstream tooling has a stable name.
             // NOTE: This file is overwritten on each invocation (including resume). The
             // timestamped files above preserve the full history.
-            if let Err(e) = atomic_write(&output_dir.join("run_info_latest.json"), json.as_bytes()) {
+            if let Err(e) = atomic_write(&output_dir.join("run_info_latest.json"), json.as_bytes())
+            {
                 eprintln!("ERROR: Failed to write run_info_latest.json: {e}");
             }
         }
@@ -3200,12 +3555,15 @@ fn main() -> ExitCode {
 
     let mut config = match parse_args() {
         Ok(c) => c,
-        Err(true)  => return ExitCode::SUCCESS,  // --help printed
-        Err(false) => return ExitCode::FAILURE,  // argument error
+        Err(true) => return ExitCode::SUCCESS, // --help printed
+        Err(false) => return ExitCode::FAILURE, // argument error
     };
 
     let run_timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S%z").to_string();
-    eprintln!("star-rseqc v{} | Run with -h or --help for usage information", env!("CARGO_PKG_VERSION"));
+    eprintln!(
+        "star-rseqc v{} | Run with -h or --help for usage information",
+        env!("CARGO_PKG_VERSION")
+    );
     eprintln!("Run timestamp: {}", run_timestamp);
     eprintln!();
 
@@ -3217,9 +3575,14 @@ fn main() -> ExitCode {
     eprintln!("Environment OK.");
     eprintln!(
         "Resources: {} job(s) x {} thread(s)/job, {:.1} GB BAM sort RAM{}",
-        config.parallel_jobs, config.threads_per_sample,
+        config.parallel_jobs,
+        config.threads_per_sample,
         config.bam_sort_ram as f64 / 1e9,
-        if config.resources_auto { " [auto-detected]" } else { " [manual]" }
+        if config.resources_auto {
+            " [auto-detected]"
+        } else {
+            " [manual]"
+        }
     );
 
     // ── Discover samples ──
@@ -3240,7 +3603,12 @@ fn main() -> ExitCode {
     // ── Create output structure ──
     for subdir in ["star", "qc", "logs", "bigwig"] {
         if let Err(e) = fs::create_dir_all(config.output_dir.join(subdir)) {
-            eprintln!("Cannot create {}/{}: {}", config.output_dir.display(), subdir, e);
+            eprintln!(
+                "Cannot create {}/{}: {}",
+                config.output_dir.display(),
+                subdir,
+                e
+            );
             return ExitCode::FAILURE;
         }
     }
@@ -3289,20 +3657,32 @@ fn main() -> ExitCode {
             }
             // Auto-generate as last resort
             let gtf_bytes = fs::metadata(&config.gtf).map(|m| m.len()).unwrap_or(0);
-            eprintln!("Converting GTF → BED12 ({:.1} GB)...", gtf_bytes as f64 / 1e9);
+            eprintln!(
+                "Converting GTF → BED12 ({:.1} GB)...",
+                gtf_bytes as f64 / 1e9
+            );
             if gtf_bytes > 1_500_000_000 {
-                eprintln!("  NOTE: Large GTF — conversion will use 2–4 GB RAM. \
-                    Use --bed to supply a pre-converted BED12 and skip this step.");
+                eprintln!(
+                    "  NOTE: Large GTF — conversion will use 2–4 GB RAM. \
+                    Use --bed to supply a pre-converted BED12 and skip this step."
+                );
             }
             // Try writing next to GTF, fallback to output dir
             let target = if let Some(candidate) = gtf_bed {
-                let writable_parent = candidate.parent().map(|p| {
-                    let test = p.join(".bed12_write_test");
-                    let ok = fs::write(&test, b"").is_ok();
-                    let _ = fs::remove_file(&test);
-                    ok
-                }).unwrap_or(false);
-                if writable_parent { candidate } else { output_bed }
+                let writable_parent = candidate
+                    .parent()
+                    .map(|p| {
+                        let test = p.join(".bed12_write_test");
+                        let ok = fs::write(&test, b"").is_ok();
+                        let _ = fs::remove_file(&test);
+                        ok
+                    })
+                    .unwrap_or(false);
+                if writable_parent {
+                    candidate
+                } else {
+                    output_bed
+                }
             } else {
                 output_bed
             };
@@ -3328,12 +3708,16 @@ fn main() -> ExitCode {
     }
 
     // ── Resume detection (SHA256 verification with parallelization) ──
-    eprintln!("Checking resume status (parallel SHA256 verification on {} samples)...", all_samples.len());
+    eprintln!(
+        "Checking resume status (parallel SHA256 verification on {} samples)...",
+        all_samples.len()
+    );
     let resume_start = Instant::now();
     let resume_results = check_resume_all_parallel(&config.output_dir, &all_samples);
     let resume_elapsed = resume_start.elapsed().as_secs_f64();
     let num_threads = resume_check_threads(all_samples.len());
-    eprintln!("  ✓ SHA256 check completed in {:.2}s ({} threads, {:.1} samples/sec)",
+    eprintln!(
+        "  ✓ SHA256 check completed in {:.2}s ({} threads, {:.1} samples/sec)",
         resume_elapsed,
         num_threads,
         all_samples.len() as f64 / resume_elapsed.max(0.01)
@@ -3347,13 +3731,13 @@ fn main() -> ExitCode {
     let mut rseqc_to_process: Vec<&Sample> = Vec::new();
 
     // Build a map of sample name → status from parallel results
-    let status_map: HashMap<String, ResumeStatus> = resume_results
-        .into_iter()
-        .map(|(name, status)| (name, status))
-        .collect();
+    let status_map: HashMap<String, ResumeStatus> = resume_results.into_iter().collect();
 
     for s in &all_samples {
-        let status = status_map.get(&s.name).cloned().unwrap_or(ResumeStatus::NotDone);
+        let status = status_map
+            .get(&s.name)
+            .cloned()
+            .unwrap_or(ResumeStatus::NotDone);
         match status {
             ResumeStatus::AllDone => {
                 already_done += 1;
@@ -3361,7 +3745,9 @@ fn main() -> ExitCode {
             }
             ResumeStatus::Phase1Changed => {
                 if config.skip_alignment {
-                    let bam = config.output_dir.join("star")
+                    let bam = config
+                        .output_dir
+                        .join("star")
                         .join(format!("{}_Aligned.sortedByCoord.out.bam", s.name));
                     if bam.exists() {
                         eprintln!("  Phase 1 CHANGED: {} — --skip-alignment set; re-running deeptools + RSeQC on existing BAM", s.name);
@@ -3398,20 +3784,32 @@ fn main() -> ExitCode {
                 let genebody_ok = is_step_done(&config.output_dir, &s.name, STEP_GENEBODY);
                 let mut changed_parts = Vec::new();
                 if !infer_ok {
-                    let _ = fs::remove_file(config.output_dir.join("qc").join(format!("{}.strand.txt", s.name)));
+                    let _ = fs::remove_file(
+                        config
+                            .output_dir
+                            .join("qc")
+                            .join(format!("{}.strand.txt", s.name)),
+                    );
                     remove_step_checkpoint(&config.output_dir, &s.name, STEP_INFER);
                     changed_parts.push("infer");
                 }
                 if !rdist_ok {
-                    let _ = fs::remove_file(config.output_dir.join("qc").join(format!("{}.read_distribution.txt", s.name)));
+                    let _ = fs::remove_file(
+                        config
+                            .output_dir
+                            .join("qc")
+                            .join(format!("{}.read_distribution.txt", s.name)),
+                    );
                     remove_step_checkpoint(&config.output_dir, &s.name, STEP_RDIST);
                     changed_parts.push("rdist");
                 }
                 if !genebody_ok {
                     let qc_dir = config.output_dir.join("qc");
                     for suffix in &[
-                        ".geneBodyCoverage.txt", ".geneBodyCoverage_plot.r",
-                        ".geneBodyCoverage.pdf", ".geneBodyCoverage.curves.pdf",
+                        ".geneBodyCoverage.txt",
+                        ".geneBodyCoverage_plot.r",
+                        ".geneBodyCoverage.pdf",
+                        ".geneBodyCoverage.curves.pdf",
                         ".geneBodyCoverage.heatMap.pdf",
                     ] {
                         let _ = fs::remove_file(qc_dir.join(format!("{}{suffix}", s.name)));
@@ -3419,7 +3817,11 @@ fn main() -> ExitCode {
                     remove_step_checkpoint(&config.output_dir, &s.name, STEP_GENEBODY);
                     changed_parts.push("genebody");
                 }
-                eprintln!("  Phase 3 CHANGED: {} — re-running: {}", s.name, changed_parts.join(", "));
+                eprintln!(
+                    "  Phase 3 CHANGED: {} — re-running: {}",
+                    s.name,
+                    changed_parts.join(", ")
+                );
                 output_changed += 1;
                 rseqc_to_process.push(s);
             }
@@ -3450,19 +3852,21 @@ fn main() -> ExitCode {
         );
     }
     if output_changed > 0 {
-        eprintln!(
-            "  {output_changed} sample(s) have corrupted/changed outputs — will re-process."
-        );
+        eprintln!("  {output_changed} sample(s) have corrupted/changed outputs — will re-process.");
     }
 
     // ── Dry run ── (before thread spawning — no I/O waste on dry-run)
     if config.dry_run {
         println!();
         println!("Dry run — {} samples discovered:\n", all_samples.len());
-        println!("  {:<25} {:<50} {}", "SAMPLE", "R1", "STATUS");
+        println!("  {:<25} {:<50} STATUS", "SAMPLE", "R1");
         println!("  {}", "-".repeat(90));
         for s in &all_samples {
-            let status = match status_map.get(&s.name).cloned().unwrap_or(ResumeStatus::NotDone) {
+            let status = match status_map
+                .get(&s.name)
+                .cloned()
+                .unwrap_or(ResumeStatus::NotDone)
+            {
                 ResumeStatus::AllDone => "✓ ALL COMPLETE",
                 ResumeStatus::Phase1Changed => "Phase 1 CHANGED — re-run STAR+deeptools+RSeQC",
                 ResumeStatus::Phase2Changed => "Phase 2 CHANGED — re-run deeptools+RSeQC",
@@ -3473,27 +3877,64 @@ fn main() -> ExitCode {
         }
         println!();
         println!("Resource plan:");
-        let src = if config.resources_auto { "auto" } else { "manual" };
-        println!("  Threads per sample : {} ({})", config.threads_per_sample, src);
-        println!("  BAM sort RAM       : {:.1} GB ({})", config.bam_sort_ram as f64 / 1e9, src);
-        println!("  STAR jobs          : {} ({})", config.parallel_star_jobs,
-            if config.parallel_star_jobs != config.parallel_jobs { "manual" } else { src });
-        println!("  deeptools jobs     : {} ({})", config.parallel_deeptools_jobs,
-            if config.parallel_deeptools_jobs != config.parallel_jobs { "manual" } else { src });
-        println!("  RSeQC jobs         : {} ({})", config.parallel_rseqc_jobs,
-            if config.parallel_rseqc_jobs != config.parallel_jobs { "manual" } else { src });
+        let src = if config.resources_auto {
+            "auto"
+        } else {
+            "manual"
+        };
+        println!(
+            "  Threads per sample : {} ({})",
+            config.threads_per_sample, src
+        );
+        println!(
+            "  BAM sort RAM       : {:.1} GB ({})",
+            config.bam_sort_ram as f64 / 1e9,
+            src
+        );
+        println!(
+            "  STAR jobs          : {} ({})",
+            config.parallel_star_jobs,
+            if config.parallel_star_jobs != config.parallel_jobs {
+                "manual"
+            } else {
+                src
+            }
+        );
+        println!(
+            "  deeptools jobs     : {} ({})",
+            config.parallel_deeptools_jobs,
+            if config.parallel_deeptools_jobs != config.parallel_jobs {
+                "manual"
+            } else {
+                src
+            }
+        );
+        println!(
+            "  RSeQC jobs         : {} ({})",
+            config.parallel_rseqc_jobs,
+            if config.parallel_rseqc_jobs != config.parallel_jobs {
+                "manual"
+            } else {
+                src
+            }
+        );
         println!("  Output: {}", config.output_dir.display());
         println!("  BED12:  {}", bed_path.display());
-        return ExitCode::SUCCESS;  // No threads spawned; no audit written for dry-run
+        return ExitCode::SUCCESS; // No threads spawned; no audit written for dry-run
     }
 
     // ── Spawn background FASTQ hashing thread ──
     // Hashing all FASTQ inputs (potentially 100s of GB) runs concurrently with
     // Phase 1 so startup is not blocked. Joined at each exit point via finish_audit!.
-    eprintln!("Spawning background FASTQ hash thread ({} files)...", all_samples.len() * 2);
+    eprintln!(
+        "Spawning background FASTQ hash thread ({} files)...",
+        all_samples.len() * 2
+    );
     let samples_for_hash = all_samples.clone();
     let mut fastq_hash_thread: Option<std::thread::JoinHandle<Vec<FastqAuditEntry>>> =
-        Some(std::thread::spawn(move || hash_fastq_inputs(&samples_for_hash)));
+        Some(std::thread::spawn(move || {
+            hash_fastq_inputs(&samples_for_hash)
+        }));
 
     // ── Spawn background reference-file hashing thread ──
     // Hashing the GTF (up to ~1 GB) in the background so write_run_info does not
@@ -3531,7 +3972,8 @@ fn main() -> ExitCode {
         () => {{
             if let Some(handle) = fastq_hash_thread.take() {
                 let fastq_inputs = handle.join().unwrap_or_default();
-                let ref_hashes = ref_hashes_thread.take()
+                let ref_hashes = ref_hashes_thread
+                    .take()
                     .and_then(|h| h.join().ok())
                     .unwrap_or_else(|| RefHashes {
                         genome_params_sha256: "UNCOMPUTED".to_string(),
@@ -3539,15 +3981,24 @@ fn main() -> ExitCode {
                         bed_sha256: "UNCOMPUTED".to_string(),
                     });
                 write_run_info(
-                    &config.output_dir, &config, &bed_path, &run_timestamp,
-                    all_samples.len(), fastq_inputs, ref_hashes,
+                    &config.output_dir,
+                    &config,
+                    &bed_path,
+                    &run_timestamp,
+                    all_samples.len(),
+                    fastq_inputs,
+                    ref_hashes,
                 );
-                eprintln!("Run info written: {}/run_info_latest.json", config.output_dir.display());
+                eprintln!(
+                    "Run info written: {}/run_info_latest.json",
+                    config.output_dir.display()
+                );
             }
         }};
     }
 
-    if star_to_process.is_empty() && deeptools_to_process.is_empty() && rseqc_to_process.is_empty() {
+    if star_to_process.is_empty() && deeptools_to_process.is_empty() && rseqc_to_process.is_empty()
+    {
         eprintln!("All samples already completed. Refreshing summary files...");
         write_summary_files(&config.output_dir, &all_samples, false, &run_timestamp);
         finish_audit!();
@@ -3556,8 +4007,8 @@ fn main() -> ExitCode {
     }
 
     // ── Phase-specific job counts ──
-    let parallel_star_jobs     = config.parallel_star_jobs;
-    let parallel_rseqc_jobs    = config.parallel_rseqc_jobs;
+    let parallel_star_jobs = config.parallel_star_jobs;
+    let parallel_rseqc_jobs = config.parallel_rseqc_jobs;
     let parallel_deeptools_jobs = config.parallel_deeptools_jobs;
     let pipeline_start = Instant::now();
 
@@ -3600,47 +4051,60 @@ fn main() -> ExitCode {
             let _ = terminal::enable_raw_mode();
         }
 
-        let mut display1 =
-            DisplayThread::start(Arc::clone(&state1), parallel_star_jobs, already_done, is_tty);
+        let mut display1 = DisplayThread::start(
+            Arc::clone(&state1),
+            parallel_star_jobs,
+            already_done,
+            is_tty,
+        );
 
         let bed_ref1 = &bed_path;
-        let _star_errors = run_work_queue(&star_to_process, parallel_star_jobs, &state1, |sample, slot| {
-            // Remove stale STAR checkpoint before running — forces recomputation
-            remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_STAR);
-            // Also invalidate downstream checkpoints since STAR outputs will change
-            remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_DEEPTOOLS);
-            remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_INFER);
-            remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_RDIST);
-            remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_GENEBODY);
+        let _star_errors = run_work_queue(
+            &star_to_process,
+            parallel_star_jobs,
+            &state1,
+            |sample, slot| {
+                // Remove stale STAR checkpoint before running — forces recomputation
+                remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_STAR);
+                // Also invalidate downstream checkpoints since STAR outputs will change
+                remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_DEEPTOOLS);
+                remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_INFER);
+                remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_RDIST);
+                remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_GENEBODY);
 
-            let result = run_star_sample(sample, config_ref, bed_ref1, &state1, slot);
-            match &result {
-                Ok(()) => {
-                    // Write per-step checkpoint immediately after STAR success
-                    match write_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_STAR) {
-                        Ok(_) => {
-                            state1.completed.fetch_add(1, Ordering::Relaxed);
-                            overall.inc_phase_done(0);
-                        }
-                        Err(e) => {
-                            state1.add_event(format!("  FAIL  {} — checkpoint write failed (disk full?): {e}", sample.name));
-                            state1.failed.fetch_add(1, Ordering::Relaxed);
-                            overall.inc_phase_done(0);
+                let result = run_star_sample(sample, config_ref, bed_ref1, &state1, slot);
+                match &result {
+                    Ok(()) => {
+                        // Write per-step checkpoint immediately after STAR success
+                        match write_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_STAR)
+                        {
+                            Ok(_) => {
+                                state1.completed.fetch_add(1, Ordering::Relaxed);
+                                overall.inc_phase_done(0);
+                            }
+                            Err(e) => {
+                                state1.add_event(format!(
+                                    "  FAIL  {} — checkpoint write failed (disk full?): {e}",
+                                    sample.name
+                                ));
+                                state1.failed.fetch_add(1, Ordering::Relaxed);
+                                overall.inc_phase_done(0);
+                            }
                         }
                     }
+                    Err(e) if e == "Cancelled" => {
+                        state1.add_event(format!("  STOP  {} — cancelled", sample.name));
+                    }
+                    Err(e) => {
+                        // STAR failed — no checkpoint written (step stays incomplete)
+                        state1.failed.fetch_add(1, Ordering::Relaxed);
+                        overall.inc_phase_done(0);
+                        state1.add_event(format!("  FAIL  {} — {}", sample.name, e));
+                    }
                 }
-                Err(e) if e == "Cancelled" => {
-                    state1.add_event(format!("  STOP  {} — cancelled", sample.name));
-                }
-                Err(e) => {
-                    // STAR failed — no checkpoint written (step stays incomplete)
-                    state1.failed.fetch_add(1, Ordering::Relaxed);
-                    overall.inc_phase_done(0);
-                    state1.add_event(format!("  FAIL  {} — {}", sample.name, e));
-                }
-            }
-            result
-        });
+                result
+            },
+        );
 
         display1.stop();
 
@@ -3673,9 +4137,12 @@ fn main() -> ExitCode {
     // ─────────────────────────────────────────────────────────────────────────
 
     // Only include samples where STAR BAM exists
-    let deeptools_to_process_phase2: Vec<&Sample> = deeptools_to_process.iter()
+    let deeptools_to_process_phase2: Vec<&Sample> = deeptools_to_process
+        .iter()
         .filter(|s| {
-            config.output_dir.join("star")
+            config
+                .output_dir
+                .join("star")
                 .join(format!("{}_Aligned.sortedByCoord.out.bam", s.name))
                 .exists()
         })
@@ -3707,41 +4174,54 @@ fn main() -> ExitCode {
             let _ = terminal::enable_raw_mode();
         }
 
-        let mut display2 = DisplayThread::start(Arc::clone(&state2), parallel_deeptools_jobs, 0, is_tty);
+        let mut display2 =
+            DisplayThread::start(Arc::clone(&state2), parallel_deeptools_jobs, 0, is_tty);
 
-        let _ = run_work_queue(&deeptools_to_process_phase2, parallel_deeptools_jobs, &state2, |sample, slot| {
-            // Remove stale deeptools checkpoint before running
-            remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_DEEPTOOLS);
-            // Invalidate downstream RSeQC checkpoints since bigwig will change
-            remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_INFER);
-            remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_RDIST);
-            remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_GENEBODY);
+        let _ = run_work_queue(
+            &deeptools_to_process_phase2,
+            parallel_deeptools_jobs,
+            &state2,
+            |sample, slot| {
+                // Remove stale deeptools checkpoint before running
+                remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_DEEPTOOLS);
+                // Invalidate downstream RSeQC checkpoints since bigwig will change
+                remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_INFER);
+                remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_RDIST);
+                remove_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_GENEBODY);
 
-            let result = run_deeptools_phase(sample, config_ref, &state2, slot);
-            match &result {
-                Ok(()) => {
-                    // Write per-step checkpoint immediately after deeptools success
-                    match write_step_checkpoint(&config_ref.output_dir, &sample.name, STEP_DEEPTOOLS) {
-                        Ok(_) => {
-                            state2.completed.fetch_add(1, Ordering::Relaxed);
-                            overall.inc_phase_done(1);
-                        }
-                        Err(e) => {
-                            state2.add_event(format!("  FAIL  {} — checkpoint write failed (disk full?): {e}", sample.name));
-                            state2.failed.fetch_add(1, Ordering::Relaxed);
-                            overall.inc_phase_done(1);
+                let result = run_deeptools_phase(sample, config_ref, &state2, slot);
+                match &result {
+                    Ok(()) => {
+                        // Write per-step checkpoint immediately after deeptools success
+                        match write_step_checkpoint(
+                            &config_ref.output_dir,
+                            &sample.name,
+                            STEP_DEEPTOOLS,
+                        ) {
+                            Ok(_) => {
+                                state2.completed.fetch_add(1, Ordering::Relaxed);
+                                overall.inc_phase_done(1);
+                            }
+                            Err(e) => {
+                                state2.add_event(format!(
+                                    "  FAIL  {} — checkpoint write failed (disk full?): {e}",
+                                    sample.name
+                                ));
+                                state2.failed.fetch_add(1, Ordering::Relaxed);
+                                overall.inc_phase_done(1);
+                            }
                         }
                     }
+                    Err(e) if e != "Cancelled" => {
+                        // deeptools failed — no checkpoint written; STAR checkpoint is preserved
+                        state2.failed.fetch_add(1, Ordering::Relaxed);
+                        overall.inc_phase_done(1);
+                    }
+                    _ => {}
                 }
-                Err(e) if e != "Cancelled" => {
-                    // deeptools failed — no checkpoint written; STAR checkpoint is preserved
-                    state2.failed.fetch_add(1, Ordering::Relaxed);
-                    overall.inc_phase_done(1);
-                }
-                _ => {}
-            }
-            result
-        });
+                result
+            },
+        );
 
         display2.stop();
 
@@ -3774,9 +4254,12 @@ fn main() -> ExitCode {
     // ─────────────────────────────────────────────────────────────────────────
 
     // Only include samples where bigwig exists (Phase 2 complete)
-    let rseqc_to_process_phase3: Vec<&Sample> = rseqc_to_process.iter()
+    let rseqc_to_process_phase3: Vec<&Sample> = rseqc_to_process
+        .iter()
         .filter(|s| {
-            config.output_dir.join("bigwig")
+            config
+                .output_dir
+                .join("bigwig")
                 .join(format!("{}.bw", s.name))
                 .exists()
         })
@@ -3815,26 +4298,32 @@ fn main() -> ExitCode {
             let _ = terminal::enable_raw_mode();
         }
 
-        let mut display3 = DisplayThread::start(Arc::clone(&state3), parallel_rseqc_jobs, 0, is_tty);
+        let mut display3 =
+            DisplayThread::start(Arc::clone(&state3), parallel_rseqc_jobs, 0, is_tty);
 
-        let _ = run_work_queue(&rseqc_to_process_phase3, parallel_rseqc_jobs, &state3, |sample, slot| {
-            let result = run_rseqc_phase3(sample, config_ref, bed_ref, &state3, slot, &overall);
-            match &result {
-                Ok(()) => {
-                    // Checkpoints already written inside run_rseqc_phase3 per sub-tool
-                    state3.completed.fetch_add(1, Ordering::Relaxed);
-                    overall.inc_phase_done(2);
+        let _ = run_work_queue(
+            &rseqc_to_process_phase3,
+            parallel_rseqc_jobs,
+            &state3,
+            |sample, slot| {
+                let result = run_rseqc_phase3(sample, config_ref, bed_ref, &state3, slot, &overall);
+                match &result {
+                    Ok(()) => {
+                        // Checkpoints already written inside run_rseqc_phase3 per sub-tool
+                        state3.completed.fetch_add(1, Ordering::Relaxed);
+                        overall.inc_phase_done(2);
+                    }
+                    Err(e) if e != "Cancelled" => {
+                        // Partial checkpoints written inside run_rseqc_phase3 for tools
+                        // that succeeded; failed tools had their outputs + checkpoints cleaned.
+                        state3.failed.fetch_add(1, Ordering::Relaxed);
+                        overall.inc_phase_done(2);
+                    }
+                    _ => {}
                 }
-                Err(e) if e != "Cancelled" => {
-                    // Partial checkpoints written inside run_rseqc_phase3 for tools
-                    // that succeeded; failed tools had their outputs + checkpoints cleaned.
-                    state3.failed.fetch_add(1, Ordering::Relaxed);
-                    overall.inc_phase_done(2);
-                }
-                _ => {}
-            }
-            result
-        });
+                result
+            },
+        );
 
         display3.stop();
 
@@ -3859,7 +4348,12 @@ fn main() -> ExitCode {
 
     // ── Write audit trail (join background hash thread) + summary files ──
     finish_audit!();
-    write_summary_files(&config.output_dir, &all_samples, was_cancelled, &run_timestamp);
+    write_summary_files(
+        &config.output_dir,
+        &all_samples,
+        was_cancelled,
+        &run_timestamp,
+    );
 
     // ── Final summary ──
     let total_failures = phase1_failed + phase2_failed_final + phase3_failed_final;
@@ -3935,11 +4429,24 @@ fn main() -> ExitCode {
         let _ = execute!(out, style::SetForegroundColor(label_color));
         println!("  OVERALL PIPELINE  (complete)");
         let _ = write!(out, "  ");
-        print_gradient_bar(&mut out, o_filled, o_empty, (180, 0, 180), (144, 238, 144), false, (255, 255, 0));
+        print_gradient_bar(
+            &mut out,
+            o_filled,
+            o_empty,
+            (180, 0, 180),
+            (144, 238, 144),
+            false,
+            (255, 255, 0),
+        );
         let _ = execute!(out, style::SetForegroundColor(label_color));
         println!(" {:>3}%", o_pct);
         let _ = execute!(out, style::SetForegroundColor(Color::DarkGrey));
-        println!("  {}/{} done   Elapsed: {}", o_done, o_total, fmt_duration(o_elapsed));
+        println!(
+            "  {}/{} done   Elapsed: {}",
+            o_done,
+            o_total,
+            fmt_duration(o_elapsed)
+        );
 
         let _ = execute!(out, style::SetForegroundColor(sep_color));
         println!("  {}", "─".repeat(term_w as usize));
@@ -3947,14 +4454,26 @@ fn main() -> ExitCode {
         let _ = execute!(out, style::SetForegroundColor(label_color));
         println!("  PHASE PROGRESS  (all phases complete)");
         let _ = write!(out, "  ");
-        print_gradient_bar(&mut out, final_bar_w, 0, (180, 0, 180), (144, 238, 144), false, (255, 255, 0));
+        print_gradient_bar(
+            &mut out,
+            final_bar_w,
+            0,
+            (180, 0, 180),
+            (144, 238, 144),
+            false,
+            (255, 255, 0),
+        );
         let _ = execute!(out, style::SetForegroundColor(label_color));
         println!(" 100%");
 
         let _ = execute!(out, style::SetForegroundColor(sep_color));
         println!("  {}", "═".repeat(term_w as usize));
 
-        let _ = execute!(out, style::SetForegroundColor(title_color), style::SetAttribute(Attribute::Bold));
+        let _ = execute!(
+            out,
+            style::SetForegroundColor(title_color),
+            style::SetAttribute(Attribute::Bold)
+        );
         if was_cancelled {
             println!("         STAR-RSeQC  —  Cancelled by user");
         } else if total_failures > 0 {
@@ -3998,14 +4517,26 @@ fn main() -> ExitCode {
 
         let _ = execute!(out, style::SetForegroundColor(label_color));
         println!("    Total elapsed:                {}", elapsed_str);
-        let threads_str = if config.resources_auto { format!("{} (auto)", config.threads_per_sample) }
-            else { config.threads_per_sample.to_string() };
-        let star_str = if config.resources_auto { format!("{} (auto)", parallel_star_jobs) }
-            else { parallel_star_jobs.to_string() };
-        let dt_str = if config.resources_auto { format!("{} (auto)", parallel_deeptools_jobs) }
-            else { parallel_deeptools_jobs.to_string() };
-        let rseqc_str = if config.resources_auto { format!("{} (auto)", parallel_rseqc_jobs) }
-            else { parallel_rseqc_jobs.to_string() };
+        let threads_str = if config.resources_auto {
+            format!("{} (auto)", config.threads_per_sample)
+        } else {
+            config.threads_per_sample.to_string()
+        };
+        let star_str = if config.resources_auto {
+            format!("{} (auto)", parallel_star_jobs)
+        } else {
+            parallel_star_jobs.to_string()
+        };
+        let dt_str = if config.resources_auto {
+            format!("{} (auto)", parallel_deeptools_jobs)
+        } else {
+            parallel_deeptools_jobs.to_string()
+        };
+        let rseqc_str = if config.resources_auto {
+            format!("{} (auto)", parallel_rseqc_jobs)
+        } else {
+            parallel_rseqc_jobs.to_string()
+        };
         println!("    Threads/sample:               {}", threads_str);
         println!("    STAR jobs:                    {}", star_str);
         println!("    deeptools jobs:               {}", dt_str);
@@ -4064,9 +4595,18 @@ fn main() -> ExitCode {
             println!("  STAR-RSeQC — Run Complete");
         }
         println!("    Total samples: {}", total);
-        println!("    Phase 1 (STAR): {} done, {} failed", phase1_completed, phase1_failed);
-        println!("    Phase 2 (deeptools): {} done, {} failed", phase2_completed, phase2_failed_final);
-        println!("    Phase 3 (RSeQC): {} done, {} failed", phase3_completed, phase3_failed_final);
+        println!(
+            "    Phase 1 (STAR): {} done, {} failed",
+            phase1_completed, phase1_failed
+        );
+        println!(
+            "    Phase 2 (deeptools): {} done, {} failed",
+            phase2_completed, phase2_failed_final
+        );
+        println!(
+            "    Phase 3 (RSeQC): {} done, {} failed",
+            phase3_completed, phase3_failed_final
+        );
         println!("    Elapsed: {}", elapsed_str);
         println!("    Output: {}", config.output_dir.display());
         println!();
@@ -4095,10 +4635,8 @@ fn cleanup_sam_files(output_dir: &Path, samples: &[Sample]) -> usize {
 
     for sample in samples {
         let sam_path = star_dir.join(format!("{}_Chimeric.out.sam", sample.name));
-        if sam_path.exists() {
-            if let Ok(_) = fs::remove_file(&sam_path) {
-                cleaned += 1;
-            }
+        if sam_path.exists() && fs::remove_file(&sam_path).is_ok() {
+            cleaned += 1;
         }
     }
 
@@ -4107,7 +4645,12 @@ fn cleanup_sam_files(output_dir: &Path, samples: &[Sample]) -> usize {
 
 // ─── Summary files ───────────────────────────────────────────────────────────
 
-fn write_summary_files(output_dir: &Path, samples: &[Sample], was_cancelled: bool, run_timestamp: &str) {
+fn write_summary_files(
+    output_dir: &Path,
+    samples: &[Sample],
+    was_cancelled: bool,
+    run_timestamp: &str,
+) {
     let star_dir = output_dir.join("star");
     let qc_dir = output_dir.join("qc");
 
@@ -4139,19 +4682,20 @@ fn write_summary_files(output_dir: &Path, samples: &[Sample], was_cancelled: boo
         .map(|s| {
             let n = &s.name;
             let digests = SampleDigests {
-                star:      read_step_checkpoint(&output_dir, n, STEP_STAR).unwrap_or_else(|| "INCOMPLETE".to_string()),
-                deeptools: read_step_checkpoint(&output_dir, n, STEP_DEEPTOOLS).unwrap_or_else(|| "INCOMPLETE".to_string()),
-                infer:     read_step_checkpoint(&output_dir, n, STEP_INFER).unwrap_or_else(|| "INCOMPLETE".to_string()),
-                rdist:     read_step_checkpoint(&output_dir, n, STEP_RDIST).unwrap_or_else(|| "INCOMPLETE".to_string()),
-                genebody:  read_step_checkpoint(&output_dir, n, STEP_GENEBODY).unwrap_or_else(|| "INCOMPLETE".to_string()),
+                star: read_step_checkpoint(output_dir, n, STEP_STAR)
+                    .unwrap_or_else(|| "INCOMPLETE".to_string()),
+                deeptools: read_step_checkpoint(output_dir, n, STEP_DEEPTOOLS)
+                    .unwrap_or_else(|| "INCOMPLETE".to_string()),
+                infer: read_step_checkpoint(output_dir, n, STEP_INFER)
+                    .unwrap_or_else(|| "INCOMPLETE".to_string()),
+                rdist: read_step_checkpoint(output_dir, n, STEP_RDIST)
+                    .unwrap_or_else(|| "INCOMPLETE".to_string()),
+                genebody: read_step_checkpoint(output_dir, n, STEP_GENEBODY)
+                    .unwrap_or_else(|| "INCOMPLETE".to_string()),
             };
             let sha256 = format!(
                 "star:{}|deeptools:{}|infer:{}|rdist:{}|genebody:{}",
-                digests.star,
-                digests.deeptools,
-                digests.infer,
-                digests.rdist,
-                digests.genebody,
+                digests.star, digests.deeptools, digests.infer, digests.rdist, digests.genebody,
             );
             SummaryRow {
                 sample: n.clone(),
@@ -4160,9 +4704,15 @@ fn write_summary_files(output_dir: &Path, samples: &[Sample], was_cancelled: boo
                 log_final: star_dir.join(format!("{n}_Log.final.out")).exists(),
                 log_out: star_dir.join(format!("{n}_Log.out")).exists(),
                 log_progress: star_dir.join(format!("{n}_Log.progress.out")).exists(),
-                bam_sorted: star_dir.join(format!("{n}_Aligned.sortedByCoord.out.bam")).exists(),
-                bam_index: star_dir.join(format!("{n}_Aligned.sortedByCoord.out.bam.bai")).exists(),
-                bam_transcriptome: star_dir.join(format!("{n}_Aligned.toTranscriptome.out.bam")).exists(),
+                bam_sorted: star_dir
+                    .join(format!("{n}_Aligned.sortedByCoord.out.bam"))
+                    .exists(),
+                bam_index: star_dir
+                    .join(format!("{n}_Aligned.sortedByCoord.out.bam.bai"))
+                    .exists(),
+                bam_transcriptome: star_dir
+                    .join(format!("{n}_Aligned.toTranscriptome.out.bam"))
+                    .exists(),
                 gene_counts: star_dir.join(format!("{n}_ReadsPerGene.out.tab")).exists(),
                 splice_junctions: star_dir.join(format!("{n}_SJ.out.tab")).exists(),
                 chimeric_junction: star_dir.join(format!("{n}_Chimeric.out.junction")).exists(),
@@ -4170,8 +4720,12 @@ fn write_summary_files(output_dir: &Path, samples: &[Sample], was_cancelled: boo
                 // RSeQC
                 strand_qc: qc_dir.join(format!("{n}.strand.txt")).exists(),
                 genebody_txt: qc_dir.join(format!("{n}.geneBodyCoverage.txt")).exists(),
-                genebody_curves_pdf: qc_dir.join(format!("{n}.geneBodyCoverage.curves.pdf")).exists(),
-                genebody_heatmap_pdf: qc_dir.join(format!("{n}.geneBodyCoverage.heatMap.pdf")).exists(),
+                genebody_curves_pdf: qc_dir
+                    .join(format!("{n}.geneBodyCoverage.curves.pdf"))
+                    .exists(),
+                genebody_heatmap_pdf: qc_dir
+                    .join(format!("{n}.geneBodyCoverage.heatMap.pdf"))
+                    .exists(),
                 readdist_qc: qc_dir.join(format!("{n}.read_distribution.txt")).exists(),
             }
         })
@@ -4183,10 +4737,14 @@ fn write_summary_files(output_dir: &Path, samples: &[Sample], was_cancelled: boo
         run_cancelled: bool,
         samples: &'a Vec<SummaryRow>,
     }
-    let summary = Summary { run_cancelled: was_cancelled, samples: &rows };
+    let summary = Summary {
+        run_cancelled: was_cancelled,
+        samples: &rows,
+    };
     match serde_json::to_string_pretty(&summary) {
         Ok(json) => {
-            if let Err(e) = atomic_write(&output_dir.join("pipeline_summary.json"), json.as_bytes()) {
+            if let Err(e) = atomic_write(&output_dir.join("pipeline_summary.json"), json.as_bytes())
+            {
                 eprintln!("ERROR: Failed to write pipeline_summary.json: {e}");
             }
         }
@@ -4208,14 +4766,24 @@ fn write_summary_files(output_dir: &Path, samples: &[Sample], was_cancelled: boo
         let ok = |b: bool| if b { "OK" } else { "MISSING" };
         tsv.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            r.sample, r.sha256,
+            r.sample,
+            r.sha256,
             was_cancelled,
-            ok(r.log_final), ok(r.log_out), ok(r.log_progress),
-            ok(r.bam_sorted), ok(r.bam_index),
-            ok(r.bam_transcriptome), ok(r.gene_counts), ok(r.splice_junctions),
-            ok(r.chimeric_junction), ok(r.chimeric_sam), ok(r.strand_qc),
-            ok(r.genebody_txt), ok(r.genebody_curves_pdf),
-            ok(r.genebody_heatmap_pdf), ok(r.readdist_qc),
+            ok(r.log_final),
+            ok(r.log_out),
+            ok(r.log_progress),
+            ok(r.bam_sorted),
+            ok(r.bam_index),
+            ok(r.bam_transcriptome),
+            ok(r.gene_counts),
+            ok(r.splice_junctions),
+            ok(r.chimeric_junction),
+            ok(r.chimeric_sam),
+            ok(r.strand_qc),
+            ok(r.genebody_txt),
+            ok(r.genebody_curves_pdf),
+            ok(r.genebody_heatmap_pdf),
+            ok(r.readdist_qc),
         ));
     }
     if let Err(e) = atomic_write(&output_dir.join("pipeline_summary.tsv"), tsv.as_bytes()) {

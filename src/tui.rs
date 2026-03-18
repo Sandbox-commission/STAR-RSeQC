@@ -174,9 +174,10 @@ fn set_fg(stdout: &mut io::Stdout, r: u8, g: u8, b: u8) {
     if is_truecolor() {
         let _ = execute!(stdout, style::SetForegroundColor(Color::Rgb { r, g, b }));
     } else {
-        let _ = execute!(stdout, style::SetForegroundColor(
-            Color::AnsiValue(rgb_to_256(r, g, b))
-        ));
+        let _ = execute!(
+            stdout,
+            style::SetForegroundColor(Color::AnsiValue(rgb_to_256(r, g, b)))
+        );
     }
 }
 
@@ -282,8 +283,12 @@ fn rgb_to_256(r: u8, g: u8, b: u8) -> u8 {
     // Check if it's close to a greyscale value (232-255: grey ramp)
     if r.abs_diff(g) < 10 && g.abs_diff(b) < 10 {
         let avg = ((r as u16 + g as u16 + b as u16) / 3) as u8;
-        if avg < 8 { return 16; }
-        if avg > 248 { return 231; }
+        if avg < 8 {
+            return 16;
+        }
+        if avg > 248 {
+            return 231;
+        }
         return 232 + ((avg as u16 - 8) * 24 / 240) as u8;
     }
     // Map to 6x6x6 color cube (indices 16-231)
@@ -353,18 +358,18 @@ impl Theme {
     fn load() -> Self {
         Self {
             section_label: fg_rgb_bold(240, 230, 140),
-            hdr_blue:      fg_rgb_bold(88, 166, 255),
-            stats_grey:    fg_rgb_bold(139, 148, 158),
-            stats_val:     fg_rgb_bold(230, 237, 243),
-            badge_blue:    fg_rgb_bold(31, 111, 235),
-            badge_text:    fg_rgb_bold(88, 166, 255),
-            sep_dim:       fg_rgb_bold(68, 68, 68),
-            cnt_done:      fg_rgb_bold(63, 185, 80),
-            cnt_skip:      fg_rgb_bold(139, 148, 158),
-            cnt_fail:      fg_rgb_bold(248, 81, 73),
-            cnt_rem:       fg_rgb_bold(88, 166, 255),
-            act_done:      fg_rgb_bold(63, 185, 80),
-            spin_color:    fg_rgb_bold(239, 159, 39),
+            hdr_blue: fg_rgb_bold(88, 166, 255),
+            stats_grey: fg_rgb_bold(139, 148, 158),
+            stats_val: fg_rgb_bold(230, 237, 243),
+            badge_blue: fg_rgb_bold(31, 111, 235),
+            badge_text: fg_rgb_bold(88, 166, 255),
+            sep_dim: fg_rgb_bold(68, 68, 68),
+            cnt_done: fg_rgb_bold(63, 185, 80),
+            cnt_skip: fg_rgb_bold(139, 148, 158),
+            cnt_fail: fg_rgb_bold(248, 81, 73),
+            cnt_rem: fg_rgb_bold(88, 166, 255),
+            act_done: fg_rgb_bold(63, 185, 80),
+            spin_color: fg_rgb_bold(239, 159, 39),
         }
     }
 }
@@ -377,19 +382,58 @@ fn theme() -> &'static Theme {
 }
 
 // Accessor functions for theme colors — return &str for use in format! strings
-#[allow(non_snake_case)] fn SECTION_LABEL() -> &'static str { &theme().section_label }
-#[allow(non_snake_case)] fn HDR_BLUE()      -> &'static str { &theme().hdr_blue }
-#[allow(non_snake_case)] fn STATS_GREY()    -> &'static str { &theme().stats_grey }
-#[allow(non_snake_case)] fn STATS_VAL()     -> &'static str { &theme().stats_val }
-#[allow(non_snake_case)] fn BADGE_BLUE()    -> &'static str { &theme().badge_blue }
-#[allow(non_snake_case)] fn BADGE_TEXT()    -> &'static str { &theme().badge_text }
-#[allow(non_snake_case)] fn SEP_DIM()       -> &'static str { &theme().sep_dim }
-#[allow(non_snake_case)] fn CNT_DONE()      -> &'static str { &theme().cnt_done }
-#[allow(non_snake_case)] fn CNT_SKIP()      -> &'static str { &theme().cnt_skip }
-#[allow(non_snake_case)] fn CNT_FAIL()      -> &'static str { &theme().cnt_fail }
-#[allow(non_snake_case)] fn CNT_REM()       -> &'static str { &theme().cnt_rem }
-#[allow(non_snake_case)] fn ACT_DONE()      -> &'static str { &theme().act_done }
-#[allow(non_snake_case)] fn SPIN_COLOR()    -> &'static str { &theme().spin_color }
+#[allow(non_snake_case)]
+fn SECTION_LABEL() -> &'static str {
+    &theme().section_label
+}
+#[allow(non_snake_case)]
+fn HDR_BLUE() -> &'static str {
+    &theme().hdr_blue
+}
+#[allow(non_snake_case)]
+fn STATS_GREY() -> &'static str {
+    &theme().stats_grey
+}
+#[allow(non_snake_case)]
+fn STATS_VAL() -> &'static str {
+    &theme().stats_val
+}
+#[allow(non_snake_case)]
+fn BADGE_BLUE() -> &'static str {
+    &theme().badge_blue
+}
+#[allow(non_snake_case)]
+fn BADGE_TEXT() -> &'static str {
+    &theme().badge_text
+}
+#[allow(non_snake_case)]
+fn SEP_DIM() -> &'static str {
+    &theme().sep_dim
+}
+#[allow(non_snake_case)]
+fn CNT_DONE() -> &'static str {
+    &theme().cnt_done
+}
+#[allow(non_snake_case)]
+fn CNT_SKIP() -> &'static str {
+    &theme().cnt_skip
+}
+#[allow(non_snake_case)]
+fn CNT_FAIL() -> &'static str {
+    &theme().cnt_fail
+}
+#[allow(non_snake_case)]
+fn CNT_REM() -> &'static str {
+    &theme().cnt_rem
+}
+#[allow(non_snake_case)]
+fn ACT_DONE() -> &'static str {
+    &theme().act_done
+}
+#[allow(non_snake_case)]
+fn SPIN_COLOR() -> &'static str {
+    &theme().spin_color
+}
 
 // ─── Pad a visual line to terminal width ─────────────────────────────────────
 
@@ -461,7 +505,9 @@ fn clip_frame(frame: &[String], h: usize) -> Vec<String> {
         return frame.to_vec();
     }
     let header_take = HEADER_ROWS.min(frame.len()).min(h);
-    let footer_take = FOOTER_ROWS.min(frame.len().saturating_sub(header_take)).min(h.saturating_sub(header_take));
+    let footer_take = FOOTER_ROWS
+        .min(frame.len().saturating_sub(header_take))
+        .min(h.saturating_sub(header_take));
     let middle_budget = h.saturating_sub(header_take + footer_take);
 
     let mut out = Vec::with_capacity(h);
@@ -526,19 +572,32 @@ pub fn render(
 
     let lm = compute_layout(w, h);
 
-    #[allow(non_snake_case)] let SECTION_LABEL = SECTION_LABEL();
-    #[allow(non_snake_case)] let HDR_BLUE = HDR_BLUE();
-    #[allow(non_snake_case)] let STATS_GREY = STATS_GREY();
-    #[allow(non_snake_case)] let STATS_VAL = STATS_VAL();
-    #[allow(non_snake_case)] let BADGE_BLUE = BADGE_BLUE();
-    #[allow(non_snake_case)] let BADGE_TEXT = BADGE_TEXT();
-    #[allow(non_snake_case)] let SEP_DIM = SEP_DIM();
-    #[allow(non_snake_case)] let CNT_DONE = CNT_DONE();
-    #[allow(non_snake_case)] let CNT_SKIP = CNT_SKIP();
-    #[allow(non_snake_case)] let CNT_FAIL = CNT_FAIL();
-    #[allow(non_snake_case)] let CNT_REM = CNT_REM();
-    #[allow(non_snake_case)] let ACT_DONE = ACT_DONE();
-    #[allow(non_snake_case)] let SPIN_COLOR = SPIN_COLOR();
+    #[allow(non_snake_case)]
+    let SECTION_LABEL = SECTION_LABEL();
+    #[allow(non_snake_case)]
+    let HDR_BLUE = HDR_BLUE();
+    #[allow(non_snake_case)]
+    let STATS_GREY = STATS_GREY();
+    #[allow(non_snake_case)]
+    let STATS_VAL = STATS_VAL();
+    #[allow(non_snake_case)]
+    let BADGE_BLUE = BADGE_BLUE();
+    #[allow(non_snake_case)]
+    let BADGE_TEXT = BADGE_TEXT();
+    #[allow(non_snake_case)]
+    let SEP_DIM = SEP_DIM();
+    #[allow(non_snake_case)]
+    let CNT_DONE = CNT_DONE();
+    #[allow(non_snake_case)]
+    let CNT_SKIP = CNT_SKIP();
+    #[allow(non_snake_case)]
+    let CNT_FAIL = CNT_FAIL();
+    #[allow(non_snake_case)]
+    let CNT_REM = CNT_REM();
+    #[allow(non_snake_case)]
+    let ACT_DONE = ACT_DONE();
+    #[allow(non_snake_case)]
+    let SPIN_COLOR = SPIN_COLOR();
 
     let mut frame: Vec<String> = Vec::with_capacity(h);
 
@@ -566,12 +625,7 @@ pub fn render(
         let sub = "STAR 2-pass alignment + RSeQC quality control  |  paired-end RNA-seq";
         let sub_vis = sub.len();
         let pad_l = w.saturating_sub(sub_vis) / 2;
-        let line = format!(
-            "{}{}{}{RESET}",
-            " ".repeat(pad_l),
-            STATS_GREY,
-            sub,
-        );
+        let line = format!("{}{}{}{RESET}", " ".repeat(pad_l), STATS_GREY, sub,);
         frame.push(pad_to_width(&line, w));
     }
     {
@@ -582,12 +636,15 @@ pub fn render(
     // ── Overall pipeline section ──
     {
         let label = format!("{}{SECTION_LABEL}OVERALL PIPELINE{RESET}", "  ");
-        let phase_name = snap.phase_label.split('\u{2014}').last().unwrap_or(&snap.phase_label).trim();
+        let phase_name = snap
+            .phase_label
+            .split('\u{2014}')
+            .next_back()
+            .unwrap_or(&snap.phase_label)
+            .trim();
         let badge = format!(
             "{BADGE_BLUE}[{BADGE_TEXT} phase {} / {} \u{2014} {} {BADGE_BLUE}]{RESET}",
-            snap.overall_phase,
-            snap.overall_total_phases,
-            phase_name,
+            snap.overall_phase, snap.overall_total_phases, phase_name,
         );
         let label_vis = 18; // "  OVERALL PIPELINE"
         let badge_vis = visible_len(&badge);
@@ -603,9 +660,12 @@ pub fn render(
         let o_empty = bar_w.saturating_sub(o_filled);
         let o_pct = (snap.overall_frac * 100.0) as usize;
         let bar = gradient_bar_string(
-            o_filled, o_empty,
-            (0x1d, 0x9e, 0x75), (0x5d, 0xca, 0xa5),
-            blink_on, (0x5d, 0xca, 0xa5),
+            o_filled,
+            o_empty,
+            (0x1d, 0x9e, 0x75),
+            (0x5d, 0xca, 0xa5),
+            blink_on,
+            (0x5d, 0xca, 0xa5),
         );
         let line = format!("  {bar} {STATS_GREY}{:>3}%{RESET}", o_pct);
         frame.push(pad_to_width(&line, w));
@@ -655,9 +715,12 @@ pub fn render(
         let p_filled = (bar_w as f64 * phase_frac) as usize;
         let p_empty = bar_w.saturating_sub(p_filled);
         let bar = gradient_bar_string(
-            p_filled, p_empty,
-            (0x18, 0x5f, 0xa5), (0x37, 0x8a, 0xdd),
-            blink_on, (0x37, 0x8a, 0xdd),
+            p_filled,
+            p_empty,
+            (0x18, 0x5f, 0xa5),
+            (0x37, 0x8a, 0xdd),
+            blink_on,
+            (0x37, 0x8a, 0xdd),
         );
         let line = format!("  {bar} {STATS_GREY}{:>3}%{RESET}", phase_pct);
         frame.push(pad_to_width(&line, w));
@@ -789,10 +852,12 @@ pub fn render(
         .collect();
 
     if active_jobs.is_empty() {
-        let empty_cell = format!("{:<width$}", " No active jobs", width = sc + stc + bc + pc + 3);
-        let line = format!(
-            "{SEP_DIM}\u{2502}{STATS_GREY}{empty_cell}{SEP_DIM}\u{2502}{RESET}",
+        let empty_cell = format!(
+            "{:<width$}",
+            " No active jobs",
+            width = sc + stc + bc + pc + 3
         );
+        let line = format!("{SEP_DIM}\u{2502}{STATS_GREY}{empty_cell}{SEP_DIM}\u{2502}{RESET}",);
         frame.push(pad_to_width(&line, w));
     }
 
@@ -810,9 +875,8 @@ pub fn render(
                     format!(" ... and {hidden} more"),
                     width = sc + stc + bc + pc + 3
                 );
-                let line = format!(
-                    "{SEP_DIM}\u{2502}{STATS_GREY}{more_cell}{SEP_DIM}\u{2502}{RESET}",
-                );
+                let line =
+                    format!("{SEP_DIM}\u{2502}{STATS_GREY}{more_cell}{SEP_DIM}\u{2502}{RESET}",);
                 frame.push(pad_to_width(&line, w));
             }
             break;
@@ -902,9 +966,7 @@ pub fn render(
         };
         let inner_w = sc + stc + bc + pc + 3;
         let elapsed_cell = format!("{:<width$}", format!("    {eta_part}"), width = inner_w);
-        let line2 = format!(
-            "{SEP_DIM}\u{2502}{STATS_GREY}{elapsed_cell}{SEP_DIM}\u{2502}{RESET}",
-        );
+        let line2 = format!("{SEP_DIM}\u{2502}{STATS_GREY}{elapsed_cell}{SEP_DIM}\u{2502}{RESET}",);
         frame.push(pad_to_width(&line2, w));
     }
 
@@ -1041,9 +1103,12 @@ pub fn render_final_frame(stdout: &mut io::Stdout, message: &str) {
     let w = tw as usize;
     let h = th as usize;
 
-    #[allow(non_snake_case)] let CNT_DONE = CNT_DONE();
-    #[allow(non_snake_case)] let STATS_GREY = STATS_GREY();
-    #[allow(non_snake_case)] let STATS_VAL = STATS_VAL();
+    #[allow(non_snake_case)]
+    let CNT_DONE = CNT_DONE();
+    #[allow(non_snake_case)]
+    let STATS_GREY = STATS_GREY();
+    #[allow(non_snake_case)]
+    let STATS_VAL = STATS_VAL();
 
     let mut frame: Vec<String> = Vec::with_capacity(h);
 
@@ -1060,7 +1125,7 @@ pub fn render_final_frame(stdout: &mut io::Stdout, message: &str) {
     }
 
     // DONE banner
-    let banner_text = format!("  \u{2714} PIPELINE COMPLETE  ");
+    let banner_text = "  \u{2714} PIPELINE COMPLETE  ".to_string();
     let banner_vis = banner_text.chars().count();
     let pad_l = w.saturating_sub(banner_vis) / 2;
     let banner_line = format!(
@@ -1075,23 +1140,13 @@ pub fn render_final_frame(stdout: &mut io::Stdout, message: &str) {
     // Message
     let msg_vis = message.chars().count();
     let msg_pad = w.saturating_sub(msg_vis) / 2;
-    let msg_line = format!(
-        "{}{}{}{RESET}",
-        " ".repeat(msg_pad),
-        STATS_VAL,
-        message,
-    );
+    let msg_line = format!("{}{}{}{RESET}", " ".repeat(msg_pad), STATS_VAL, message,);
     frame.push(pad_to_width(&msg_line, w));
 
     // Hint
     let hint = "Press any key or wait 10s...";
     let hint_pad = w.saturating_sub(hint.len()) / 2;
-    let hint_line = format!(
-        "{}{}{}{RESET}",
-        " ".repeat(hint_pad),
-        STATS_GREY,
-        hint,
-    );
+    let hint_line = format!("{}{}{}{RESET}", " ".repeat(hint_pad), STATS_GREY, hint,);
     frame.push(pad_to_width(&hint_line, w));
 
     // Fill rest
