@@ -254,6 +254,16 @@ first_match() {
 }
 
 normalize_gtf_if_gz() {
+  if [[ -n "$GTF_FILE" && -d "$GTF_FILE" ]]; then
+    local detected_gtf
+    detected_gtf="$(first_match "$GTF_FILE" "*.gtf" "*.gtf.gz" || true)"
+    if [[ -z "$detected_gtf" ]]; then
+      die "GTF path points to a directory with no .gtf/.gtf.gz files: $GTF_FILE"
+    fi
+    log "Detected GTF directory, using: $detected_gtf"
+    GTF_FILE="$detected_gtf"
+  fi
+
   if [[ -n "$GTF_FILE" && "$GTF_FILE" == *.gz ]]; then
     have gzip || die "gzip is required to unpack GTF: $GTF_FILE"
     local out_gtf="${GTF_FILE%.gz}"

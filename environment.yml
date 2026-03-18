@@ -4,7 +4,6 @@ channels:
   - bioconda
 dependencies:
   - rust=1.76
-  - cargo
   - star=2.7.11b
   - samtools=1.20
   - rseqc=5.0.1
